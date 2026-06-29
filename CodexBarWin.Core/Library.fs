@@ -126,15 +126,13 @@ module ConfigStore =
                 JsonSerializer.Deserialize<CodexBarConfig>(json, options)
             else
                 let defaultConfig = createDefaultConfig()
-                // Create directory if not exists
                 let dir = Path.GetDirectoryName(path)
                 if not (Directory.Exists(dir)) then
                     Directory.CreateDirectory(dir) |> ignore
                 let json = JsonSerializer.Serialize(defaultConfig, JsonSerializerOptions(WriteIndented = true))
                 File.WriteAllText(path, json)
                 defaultConfig
-        with ex ->
-            // Fallback to default config on error
+        with _ ->
             createDefaultConfig()
 
     let save (config: CodexBarConfig) =
@@ -148,16 +146,186 @@ module ConfigStore =
         with _ ->
             ()
 
+module DateParser =
+    let formatCountdown (resetsAtStr: string) =
+        match DateTime.TryParse(resetsAtStr) with
+        | true, date ->
+            let diff = date.ToUniversalTime() - DateTime.UtcNow
+            if diff.TotalSeconds <= 0.0 then
+                "Resets now"
+            else
+                let hours = int diff.TotalHours
+                let minutes = diff.Minutes
+                if hours > 24 then
+                    sprintf "%dd %dh" (hours / 24) (hours % 24)
+                elif hours > 0 then
+                    sprintf "%dh %dm" hours minutes
+                else
+                    sprintf "%dm" minutes
+        | _ -> "Unknown"
+
 module UsageFetcher =
     let private client = new HttpClient()
+    
+    // Set modern User-Agent to avoid getting blocked by Cloudflare/WAF
+    let private setupHeaders (headers: HttpRequestHeaders) =
+        headers.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        headers.Accept.ParseAdd("application/json, text/plain, */*")
 
-    // Helper to query DeepSeek balance
+    // 1. OpenAI Credit Grants API
+    let private fetchOpenAIBalance (apiKey: string) : Task<ProviderUsage> = task {
+        let provider = UsageProvider.OpenAI
+        let name = ProviderMapping.getDisplayName provider
+        try
+            use request = new HttpRequestMessage(HttpMethod.Get, "https://api.openai.com/v1/dashboard/billing/credit_grants")
+            setupHeaders request.Headers
+            request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", apiKey.Trim())
+            
+            let! response = client.SendAsync(request)
+            if response.IsSuccessStatusCode then
+                let! content = response.Content.ReadAsStringAsync()
+                use doc = JsonDocument.Parse(content)
+                let root = doc.RootElement
+                let totalGranted = root.GetProperty("total_granted").GetDouble()
+                let totalUsed = root.GetProperty("total_used").GetDouble()
+                let totalAvailable = root.GetProperty("total_available").GetDouble()
+                
+                return {
+                    Provider = provider; Id = "openai"; DisplayName = name
+                    Used = totalUsed; Limit = totalGranted; Unit = "$"
+                    ResetCountdown = "Credit Expiry"
+                    Status = "healthy"; IsMock = false; HasError = false; ErrorMessage = ""
+                    CostInfo = sprintf "Available: $%M / $%M" (decimal totalAvailable) (decimal totalGranted)
+                }
+            else
+                return {
+                    Provider = provider; Id = "openai"; DisplayName = name
+                    Used = 0.0; Limit = 100.0; Unit = "$"; ResetCountdown = "N/A"
+                    Status = "degraded"; IsMock = false; HasError = true
+                    ErrorMessage = sprintf "API returned status %d" (int response.StatusCode)
+                    CostInfo = ""
+                }
+        with ex ->
+            return {
+                Provider = provider; Id = "openai"; DisplayName = name
+                Used = 0.0; Limit = 100.0; Unit = "$"; ResetCountdown = "N/A"
+                Status = "degraded"; IsMock = false; HasError = true; ErrorMessage = ex.Message; CostInfo = ""
+            }
+    }
+
+    // 2. Claude Web API (using browser session cookies)
+    let private fetchClaudeUsage (cookieSource: string) : Task<ProviderUsage> = task {
+        let provider = UsageProvider.Claude
+        let name = ProviderMapping.getDisplayName provider
+        try
+            // Extract sessionKey from cookie header
+            let sessionKey = 
+                if cookieSource.Contains("sessionKey=") then
+                    let start = cookieSource.IndexOf("sessionKey=") + "sessionKey=".Length
+                    let endIdx = cookieSource.IndexOf(";", start)
+                    if endIdx = -1 then cookieSource.Substring(start).Trim()
+                    else cookieSource.Substring(start, endIdx - start).Trim()
+                else
+                    cookieSource.Trim()
+
+            // Step A: Fetch organizations
+            use orgRequest = new HttpRequestMessage(HttpMethod.Get, "https://claude.ai/api/organizations")
+            setupHeaders orgRequest.Headers
+            orgRequest.Headers.Add("Cookie", sprintf "sessionKey=%s" sessionKey)
+            
+            let! orgResponse = client.SendAsync(orgRequest)
+            if orgResponse.IsSuccessStatusCode then
+                let! orgContent = orgResponse.Content.ReadAsStringAsync()
+                use orgDoc = JsonDocument.Parse(orgContent)
+                let orgsArray = orgDoc.RootElement
+                if orgsArray.ValueKind = JsonValueKind.Array && orgsArray.GetArrayLength() > 0 then
+                    let orgId = orgsArray.[0].GetProperty("uuid").GetString()
+                    
+                    // Step B: Fetch usage for the organization
+                    let usageUrl = sprintf "https://claude.ai/api/organizations/%s/usage" orgId
+                    use usageRequest = new HttpRequestMessage(HttpMethod.Get, usageUrl)
+                    setupHeaders usageRequest.Headers
+                    usageRequest.Headers.Add("Cookie", sprintf "sessionKey=%s" sessionKey)
+                    
+                    let! usageResponse = client.SendAsync(usageRequest)
+                    if usageResponse.IsSuccessStatusCode then
+                        let! usageContent = usageResponse.Content.ReadAsStringAsync()
+                        use usageDoc = JsonDocument.Parse(usageContent)
+                        let root = usageDoc.RootElement
+                        
+                        let mutable used = 0.0
+                        let mutable resetsAt = "Never Resets"
+                        let mutable costInfo = "Claude Plan"
+                        
+                        // Parse five_hour (session) usage
+                        let mutable fiveHourProp = new JsonElement()
+                        let mutable sevenDayProp = new JsonElement()
+                        let mutable utilProp = new JsonElement()
+                        let mutable resetsProp = new JsonElement()
+                        
+                        if root.TryGetProperty("five_hour", &fiveHourProp) && fiveHourProp.ValueKind <> JsonValueKind.Null then
+                            if fiveHourProp.TryGetProperty("utilization", &utilProp) then
+                                used <- utilProp.GetDouble() * 100.0 // utilization is fraction in some accounts or percent
+                            if fiveHourProp.TryGetProperty("resets_at", &resetsProp) then
+                                resetsAt <- DateParser.formatCountdown (resetsProp.GetString())
+                            costInfo <- "5-hour session quota"
+                        elif root.TryGetProperty("seven_day", &sevenDayProp) && sevenDayProp.ValueKind <> JsonValueKind.Null then
+                            if sevenDayProp.TryGetProperty("utilization", &utilProp) then
+                                used <- utilProp.GetDouble() * 100.0
+                            if sevenDayProp.TryGetProperty("resets_at", &resetsProp) then
+                                resetsAt <- DateParser.formatCountdown (resetsProp.GetString())
+                            costInfo <- "7-day weekly quota"
+                            
+                        // Bound used percent
+                        used <- Math.Clamp(used, 0.0, 100.0)
+                        
+                        return {
+                            Provider = provider; Id = "claude"; DisplayName = name
+                            Used = used; Limit = 100.0; Unit = "%"
+                            ResetCountdown = resetsAt
+                            Status = "healthy"; IsMock = false; HasError = false; ErrorMessage = ""
+                            CostInfo = costInfo
+                        }
+                    else
+                        return {
+                            Provider = provider; Id = "claude"; DisplayName = name
+                            Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
+                            Status = "degraded"; IsMock = false; HasError = true
+                            ErrorMessage = sprintf "Usage API returned HTTP %d" (int usageResponse.StatusCode)
+                            CostInfo = ""
+                        }
+                else
+                    return {
+                        Provider = provider; Id = "claude"; DisplayName = name
+                        Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
+                        Status = "degraded"; IsMock = false; HasError = true
+                        ErrorMessage = "No organization UUID found"
+                        CostInfo = ""
+                    }
+            else
+                return {
+                    Provider = provider; Id = "claude"; DisplayName = name
+                    Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
+                    Status = "degraded"; IsMock = false; HasError = true
+                    ErrorMessage = sprintf "Orgs API returned HTTP %d (Invalid sessionKey?)" (int orgResponse.StatusCode)
+                    CostInfo = ""
+                }
+        with ex ->
+            return {
+                Provider = provider; Id = "claude"; DisplayName = name
+                Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
+                Status = "degraded"; IsMock = false; HasError = true; ErrorMessage = ex.Message; CostInfo = ""
+            }
+    }
+
+    // 3. DeepSeek User Balance API
     let private fetchDeepSeekBalance (apiKey: string) : Task<ProviderUsage> = task {
         let provider = UsageProvider.DeepSeek
         let name = ProviderMapping.getDisplayName provider
         try
             use request = new HttpRequestMessage(HttpMethod.Get, "https://api.deepseek.com/user/balance")
-            request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", apiKey)
+            setupHeaders request.Headers
+            request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", apiKey.Trim())
             
             let! response = client.SendAsync(request)
             if response.IsSuccessStatusCode then
@@ -173,28 +341,19 @@ module UsageFetcher =
                         totalBalance <- totalBalance + balance
                     
                     return {
-                        Provider = provider
-                        Id = "deepseek"
-                        DisplayName = name
-                        Used = 0.0 // Credits display does not necessarily have a direct usage/limit ratio
-                        Limit = totalBalance // Display total balance as the limit/available
-                        Unit = "$"
+                        Provider = provider; Id = "deepseek"; DisplayName = name
+                        Used = 0.0; Limit = totalBalance; Unit = "$"
                         ResetCountdown = "Never Resets"
-                        Status = "healthy"
-                        IsMock = false
-                        HasError = false
-                        ErrorMessage = ""
+                        Status = "healthy"; IsMock = false; HasError = false; ErrorMessage = ""
                         CostInfo = sprintf "Available: $%M" (decimal totalBalance)
                     }
                 else
                     return {
                         Provider = provider; Id = "deepseek"; DisplayName = name
                         Used = 0.0; Limit = 0.0; Unit = "$"; ResetCountdown = "N/A"
-                        Status = "degraded"; IsMock = false; HasError = true
-                        ErrorMessage = "Account is unavailable"; CostInfo = ""
+                        Status = "degraded"; IsMock = false; HasError = true; ErrorMessage = "Account is unavailable"; CostInfo = ""
                     }
             else
-                let! errorText = response.Content.ReadAsStringAsync()
                 return {
                     Provider = provider; Id = "deepseek"; DisplayName = name
                     Used = 0.0; Limit = 0.0; Unit = "$"; ResetCountdown = "N/A"
@@ -205,18 +364,18 @@ module UsageFetcher =
             return {
                 Provider = provider; Id = "deepseek"; DisplayName = name
                 Used = 0.0; Limit = 0.0; Unit = "$"; ResetCountdown = "N/A"
-                Status = "degraded"; IsMock = false; HasError = true
-                ErrorMessage = ex.Message; CostInfo = ""
+                Status = "degraded"; IsMock = false; HasError = true; ErrorMessage = ex.Message; CostInfo = ""
             }
     }
 
-    // Helper to query OpenRouter balance
+    // 4. OpenRouter Key Info API
     let private fetchOpenRouterBalance (apiKey: string) : Task<ProviderUsage> = task {
         let provider = UsageProvider.OpenRouter
         let name = ProviderMapping.getDisplayName provider
         try
             use request = new HttpRequestMessage(HttpMethod.Get, "https://openrouter.ai/api/v1/auth/key")
-            request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", apiKey)
+            setupHeaders request.Headers
+            request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", apiKey.Trim())
             
             let! response = client.SendAsync(request)
             if response.IsSuccessStatusCode then
@@ -228,17 +387,10 @@ module UsageFetcher =
                 let usage = data.GetProperty("usage").GetDouble()
                 
                 return {
-                    Provider = provider
-                    Id = "openrouter"
-                    DisplayName = name
-                    Used = usage
-                    Limit = limit
-                    Unit = "$"
+                    Provider = provider; Id = "openrouter"; DisplayName = name
+                    Used = usage; Limit = limit; Unit = "$"
                     ResetCountdown = "Monthly Reset"
-                    Status = "healthy"
-                    IsMock = false
-                    HasError = false
-                    ErrorMessage = ""
+                    Status = "healthy"; IsMock = false; HasError = false; ErrorMessage = ""
                     CostInfo = sprintf "Used: $%M / $%M" (decimal usage) (decimal limit)
                 }
             else
@@ -246,19 +398,98 @@ module UsageFetcher =
                     Provider = provider; Id = "openrouter"; DisplayName = name
                     Used = 0.0; Limit = 0.0; Unit = "$"; ResetCountdown = "N/A"
                     Status = "degraded"; IsMock = false; HasError = true
-                    ErrorMessage = sprintf "API error: %O" response.StatusCode; CostInfo = ""
+                    ErrorMessage = sprintf "API returned status %O" response.StatusCode; CostInfo = ""
                 }
         with ex ->
             return {
                 Provider = provider; Id = "openrouter"; DisplayName = name
                 Used = 0.0; Limit = 0.0; Unit = "$"; ResetCountdown = "N/A"
-                Status = "degraded"; IsMock = false; HasError = true
-                ErrorMessage = ex.Message; CostInfo = ""
+                Status = "degraded"; IsMock = false; HasError = true; ErrorMessage = ex.Message; CostInfo = ""
             }
     }
 
-    // Generates high-fidelity mock data if api key is missing or for display
-    let getMockData (provider: UsageProvider) : ProviderUsage =
+    // 5. Gemini Private Quota API (loads credentials from local gcloud/gemini-cli workspace)
+    let rec private fetchGeminiUsage () : Task<ProviderUsage> = task {
+        let provider = UsageProvider.Gemini
+        let name = ProviderMapping.getDisplayName provider
+        try
+            let userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            let credsPath = Path.Combine(userProfile, ".gemini", "oauth_creds.json")
+            
+            if File.Exists(credsPath) then
+                let credsJson = File.ReadAllText(credsPath)
+                use doc = JsonDocument.Parse(credsJson)
+                let root = doc.RootElement
+                
+                let mutable accessTokenProp = new JsonElement()
+                if root.TryGetProperty("access_token", &accessTokenProp) then
+                    let accessToken = accessTokenProp.GetString()
+                    
+                    // Call the retrieveUserQuota RPC endpoint
+                    use request = new HttpRequestMessage(HttpMethod.Post, "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota")
+                    setupHeaders request.Headers
+                    request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", accessToken)
+                    request.Content <- new StringContent("{}", System.Text.Encoding.UTF8, "application/json")
+                    
+                    let! response = client.SendAsync(request)
+                    if response.IsSuccessStatusCode then
+                        let! content = response.Content.ReadAsStringAsync()
+                        use quotaDoc = JsonDocument.Parse(content)
+                        let quotaRoot = quotaDoc.RootElement
+                        
+                        let mutable lowestFraction = 1.0
+                        let mutable resetTime = "Daily Quota"
+                        
+                        let mutable bucketsProp = new JsonElement()
+                        let mutable fractionProp = new JsonElement()
+                        let mutable resetProp = new JsonElement()
+                        
+                        if quotaRoot.TryGetProperty("buckets", &bucketsProp) && bucketsProp.ValueKind = JsonValueKind.Array then
+                            for bucket in bucketsProp.EnumerateArray() do
+                                if bucket.TryGetProperty("remainingFraction", &fractionProp) then
+                                    let fraction = fractionProp.GetDouble()
+                                    if fraction < lowestFraction then
+                                        lowestFraction <- fraction
+                                if bucket.TryGetProperty("resetTime", &resetProp) then
+                                    resetTime <- DateParser.formatCountdown (resetProp.GetString())
+                                    
+                        let usedPercent = (1.0 - lowestFraction) * 100.0
+                        return {
+                            Provider = provider; Id = "gemini"; DisplayName = name
+                            Used = usedPercent; Limit = 100.0; Unit = "%"
+                            ResetCountdown = resetTime
+                            Status = "healthy"; IsMock = false; HasError = false; ErrorMessage = ""
+                            CostInfo = "Google Code Assist Quota"
+                        }
+                    else
+                        return {
+                            Provider = provider; Id = "gemini"; DisplayName = name
+                            Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
+                            Status = "degraded"; IsMock = false; HasError = true
+                            ErrorMessage = sprintf "Quota API returned status %d" (int response.StatusCode)
+                            CostInfo = ""
+                        }
+                else
+                    return {
+                        Provider = provider; Id = "gemini"; DisplayName = name
+                        Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
+                        Status = "degraded"; IsMock = false; HasError = true
+                        ErrorMessage = "Credentials file missing access_token"
+                        CostInfo = ""
+                    }
+            else
+                // No credentials file found - generate mock telemetry
+                return getMockData provider
+        with ex ->
+            return {
+                Provider = provider; Id = "gemini"; DisplayName = name
+                Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
+                Status = "degraded"; IsMock = false; HasError = true; ErrorMessage = ex.Message; CostInfo = ""
+            }
+    }
+
+    // Generates high-fidelity mock data if api key is missing
+    and getMockData (provider: UsageProvider) : ProviderUsage =
         let name = ProviderMapping.getDisplayName provider
         let id = ProviderMapping.toString provider
         match provider with
@@ -275,7 +506,7 @@ module UsageFetcher =
             { Provider = provider; Id = id; DisplayName = name; Used = 384.0; Limit = 500.0; Unit = "fast"
               ResetCountdown = "Resets July 5"; Status = "healthy"; IsMock = true; HasError = false; ErrorMessage = ""; CostInfo = "384 / 500 fast requests" }
         | UsageProvider.Gemini ->
-            { Provider = provider; Id = id; DisplayName = name; Used = 12000.0; Limit = 20000.0; Unit = "tokens"
+            { Provider = provider; Id = id; DisplayName = name; Used = 60.0; Limit = 100.0; Unit = "%"
               ResetCountdown = "Daily Quota"; Status = "healthy"; IsMock = true; HasError = false; ErrorMessage = ""; CostInfo = "RPM: 15 / 360" }
         | UsageProvider.DeepSeek ->
             { Provider = provider; Id = id; DisplayName = name; Used = 2.15; Limit = 15.0; Unit = "$"
@@ -298,17 +529,23 @@ module UsageFetcher =
 
     let fetch (config: ProviderConfig) : Task<ProviderUsage> = task {
         let provider = ProviderMapping.fromString config.id
-        if String.IsNullOrWhiteSpace(config.apiKey) then
-            // No API key - return high-fidelity mock data so the app displays beautifully out-of-the-box
+        
+        // Check keys/cookies
+        let hasApiKey = not (String.IsNullOrWhiteSpace(config.apiKey))
+        let hasCookie = not (String.IsNullOrWhiteSpace(config.cookieHeader))
+        
+        match provider with
+        | UsageProvider.OpenAI when hasApiKey ->
+            return! fetchOpenAIBalance config.apiKey
+        | UsageProvider.Claude when hasCookie || hasApiKey ->
+            let token = if hasCookie then config.cookieHeader else config.apiKey
+            return! fetchClaudeUsage token
+        | UsageProvider.DeepSeek when hasApiKey -> 
+            return! fetchDeepSeekBalance config.apiKey
+        | UsageProvider.OpenRouter when hasApiKey -> 
+            return! fetchOpenRouterBalance config.apiKey
+        | UsageProvider.Gemini ->
+            return! fetchGeminiUsage ()
+        | _ ->
             return getMockData provider
-        else
-            match provider with
-            | UsageProvider.DeepSeek -> 
-                return! fetchDeepSeekBalance config.apiKey
-            | UsageProvider.OpenRouter -> 
-                return! fetchOpenRouterBalance config.apiKey
-            // Fallback for others (like OpenAI, Claude which require browser cookies or complex CLI configurations)
-            | _ -> 
-                let mock = getMockData provider
-                return { mock with IsMock = false; CostInfo = mock.CostInfo + " (API key configured)" }
     }
