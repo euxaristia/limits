@@ -26,7 +26,7 @@ namespace CodexBarWin
 
         private readonly TaskbarIcon _taskbarIcon;
         private bool _isExiting = false;
-        
+
         public ObservableCollection<ProviderViewModel> Providers { get; } = new();
         public ObservableCollection<ProviderSettingItem> SettingsItems { get; } = new();
 
@@ -140,7 +140,7 @@ namespace CodexBarWin
 
             // 2. Map enabled providers to viewmodels
             var activeConfigs = config.providers.Where(p => p.enabled.HasValue && p.enabled.Value).ToList();
-            
+
             // Create view models
             var tasks = activeConfigs.Select(async providerConfig =>
             {
@@ -172,7 +172,7 @@ namespace CodexBarWin
 
                 string id = ProviderMapping.toString(provider);
                 string displayName = ProviderMapping.getDisplayName(provider);
-                
+
                 ProviderConfig? existing = config.providers.FirstOrDefault(p => p.id == id);
                 bool isEnabled = existing != null && existing.enabled.HasValue && existing.enabled.Value;
                 string apiKey = existing?.apiKey ?? "";
@@ -324,7 +324,7 @@ namespace CodexBarWin
 
         public string Id { get; }
         public string DisplayName { get; }
-        
+
         private bool _isEnabled;
         public bool IsEnabled
         {
