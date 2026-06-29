@@ -53,62 +53,112 @@
             <!-- 1. Dashboard Panel -->
             <ScrollViewer x:Name="DashboardPanel" Visibility="Visible" Padding="16,8,16,16" VerticalScrollBarVisibility="Auto">
                 <StackPanel Spacing="12">
-                    <TextBlock Text="ACTIVE PROVIDERS" FontSize="10" FontWeight="Bold" Foreground="#FF8B8B90" CharacterSpacing="60" Margin="0,8,0,4" />
-                    
-                    <ItemsControl x:Name="ProvidersItemsControl">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate x:DataType="local:ProviderViewModel">
-                                <Border Margin="0,0,0,12" Background="#1D1D20" CornerRadius="8" Padding="12" BorderBrush="#2D2D30" BorderThickness="1">
-                                    <Grid>
-                                        <Grid.RowDefinitions>
-                                            <RowDefinition Height="Auto" />
-                                            <RowDefinition Height="Auto" />
-                                            <RowDefinition Height="Auto" />
-                                        </Grid.RowDefinitions>
-                                        
-                                        <!-- Row 1: Title, Status Badge, Percent -->
-                                        <Grid Grid.Row="0" Margin="0,0,0,6">
+                    <!-- Tab strip: horizontal list of provider chips. First chip
+                         is "Overview"; rest are the configured providers. -->
+                    <ListView x:Name="TabsList"
+                              ItemsSource="{x:Bind Tabs}"
+                              SelectionMode="None"
+                              IsItemClickEnabled="False"
+                              ScrollViewer.HorizontalScrollMode="Enabled"
+                              ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                              ScrollViewer.VerticalScrollMode="Disabled"
+                              ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                              Height="40">
+                        <ListView.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal" Spacing="4" />
+                            </ItemsPanelTemplate>
+                        </ListView.ItemsPanel>
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="Padding" Value="0" />
+                                <Setter Property="Margin" Value="0" />
+                                <Setter Property="MinWidth" Value="0" />
+                                <Setter Property="MinHeight" Value="0" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="local:ProviderTabItem">
+                                <Button Click="Tab_Click"
+                                        Padding="10,6"
+                                        CornerRadius="6"
+                                        BorderThickness="0"
+                                        Background="{x:Bind TabBackground, Mode=OneWay}">
+                                    <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                        <FontIcon Glyph="{x:Bind IconGlyph}" FontFamily="Segoe MDL2 Assets" FontSize="12" />
+                                        <TextBlock Text="{x:Bind DisplayName, Mode=OneTime}" FontSize="12" />
+                                    </StackPanel>
+                                </Button>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+
+                    <TextBlock Text="ACTIVE PROVIDERS" FontSize="10" FontWeight="Bold" Foreground="#FF8B8B90" CharacterSpacing="60" Margin="0,4,0,4" />
+
+                    <!-- Overview body: compact list, one row per provider -->
+                    <Grid x:Name="OverviewBody" Visibility="Visible">
+                        <ItemsControl x:Name="OverviewList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="local:ProviderViewModel">
+                                    <Border Margin="0,0,0,8" Background="#1D1D20" CornerRadius="8" Padding="12" BorderBrush="#2D2D30" BorderThickness="1">
+                                        <Grid>
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
-                                            
                                             <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-                                                <!-- Status indicator circle -->
-                                                <Ellipse Width="8" Height="8" Fill="{x:Bind StatusBrush, Mode=OneTime}" VerticalAlignment="Center" />
-                                                <TextBlock Text="{x:Bind DisplayName, Mode=OneTime}" FontWeight="SemiBold" FontSize="13" Foreground="#FFFFFFFF" />
-                                                <Border CornerRadius="4" Background="#2A2A2E" Padding="4,1" Visibility="{x:Bind IsMockVisibility, Mode=OneTime}">
+                                                <Ellipse Width="6" Height="6" Fill="{x:Bind StatusBrush}" VerticalAlignment="Center" />
+                                                <TextBlock Text="{x:Bind DisplayName, Mode=OneTime}" FontWeight="SemiBold" FontSize="12" Foreground="#FFFFFFFF" />
+                                                <Border CornerRadius="3" Background="#2A2A2E" Padding="3,0" Visibility="{x:Bind IsMockVisibility}">
                                                     <TextBlock Text="MOCK" FontSize="8" Foreground="#FF8B8B90" FontWeight="Bold" />
                                                 </Border>
                                             </StackPanel>
-                                            
-                                            <TextBlock Grid.Column="1" Text="{x:Bind PercentText, Mode=OneTime}" FontSize="12" Foreground="#FF8B8B90" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                <TextBlock Text="{x:Bind Windows[0].PercentText, Mode=OneTime}" FontSize="11" Foreground="#FF8B8B90" FontWeight="SemiBold" />
+                                                <TextBlock Text="{x:Bind Windows[0].ResetCountdown, Mode=OneTime}" FontSize="10" Foreground="#FF5A5A60" />
+                                            </StackPanel>
                                         </Grid>
-                                        
-                                        <!-- Row 2: Custom Gradient Progress Bar -->
-                                        <Grid Grid.Row="1" Height="6" CornerRadius="3" Background="#28282B" Margin="0,2,0,8">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="{x:Bind UsedStarWidth, Mode=OneTime}" />
-                                                <ColumnDefinition Width="{x:Bind RemainingStarWidth, Mode=OneTime}" />
-                                            </Grid.ColumnDefinitions>
-                                            <Border Grid.Column="0" CornerRadius="3" Background="{x:Bind ProgressBarBrush, Mode=OneTime}" />
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </Grid>
+
+                    <!-- Provider body: one card with a list of per-window rows -->
+                    <Grid x:Name="ProviderBody" Visibility="Collapsed">
+                        <ItemsControl x:Name="ProviderList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="local:WindowViewModel">
+                                    <Border Margin="0,0,0,8" Background="#1D1D20" CornerRadius="8" Padding="12" BorderBrush="#2D2D30" BorderThickness="1">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
+                                            <Grid Grid.Row="0" Margin="0,0,0,4">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Text="{x:Bind Label, Mode=OneTime}" FontWeight="SemiBold" FontSize="11" Foreground="#FFB0B0B5" VerticalAlignment="Center" />
+                                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                                    <TextBlock Text="{x:Bind PercentText, Mode=OneTime}" FontSize="11" Foreground="#FF8B8B90" FontWeight="SemiBold" />
+                                                    <TextBlock Text="{x:Bind ResetCountdown, Mode=OneTime}" FontSize="10" Foreground="#FF5A5A60" />
+                                                </StackPanel>
+                                            </Grid>
+                                            <Grid Grid.Row="1" Height="6" CornerRadius="3" Background="#28282B">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="{x:Bind UsedStarWidth, Mode=OneTime}" />
+                                                    <ColumnDefinition Width="{x:Bind RemainingStarWidth, Mode=OneTime}" />
+                                                </Grid.ColumnDefinitions>
+                                                <Border Grid.Column="0" CornerRadius="3" Background="{x:Bind ProgressBarBrush, Mode=OneTime}" />
+                                            </Grid>
                                         </Grid>
-                                        
-                                        <!-- Row 3: Usage, Limit, Countdown -->
-                                        <Grid Grid.Row="2">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            
-                                            <TextBlock Grid.Column="0" Text="{x:Bind CostInfo, Mode=OneTime}" FontSize="11" Foreground="#FFB0B0B5" TextTrimming="CharacterEllipsis" />
-                                            <TextBlock Grid.Column="1" Text="{x:Bind ResetCountdown, Mode=OneTime}" FontSize="10" Foreground="#FF8B8B90" HorizontalAlignment="Right" />
-                                        </Grid>
-                                    </Grid>
-                                </Border>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </Grid>
                 </StackPanel>
             </ScrollViewer>
 

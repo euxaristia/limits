@@ -30,11 +30,46 @@ namespace CodexBarWin
         private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
         private const int DWMWA_BORDER_COLOR = 34;
 
+        // DWM's COLORREF is 0x00BBGGRR, not ARGB. Helper avoids the encoding confusion.
+        private static int ColorRef(byte r, byte g, byte b) =>
+            (b << 16) | (g << 8) | r;
+
         private readonly TaskbarIcon _taskbarIcon;
         private bool _isExiting = false;
 
         public ObservableCollection<ProviderViewModel> Providers { get; } = new();
+        public ObservableCollection<ProviderTabItem> Tabs { get; } = new();
         public ObservableCollection<ProviderSettingItem> SettingsItems { get; } = new();
+
+        // Tab/body state. Defaults to Overview so the first time the popup
+        // opens, the user sees the at-a-glance summary across all providers.
+        private bool _overviewMode = true;
+        public bool OverviewMode
+        {
+            get => _overviewMode;
+            set
+            {
+                if (_overviewMode != value)
+                {
+                    _overviewMode = value;
+                    BindBody();
+                }
+            }
+        }
+
+        private ProviderViewModel? _selectedProvider;
+        public ProviderViewModel? SelectedProvider
+        {
+            get => _selectedProvider;
+            set
+            {
+                if (_selectedProvider != value)
+                {
+                    _selectedProvider = value;
+                    BindBody();
+                }
+            }
+        }
 
         public MainWindow()
         {
@@ -59,6 +94,9 @@ namespace CodexBarWin
             // Handle close button click (close to tray)
             this.Closed += MainWindow_Closed;
 
+            // Initial body binding (Overview is selected by default).
+            BindBody();
+
             // Load configurations and fetch usage data
             LoadConfigAndRefresh();
         }
@@ -80,16 +118,31 @@ namespace CodexBarWin
                 presenter.SetBorderAndTitleBar(false, false);
             }
 
-            // Force immersive dark mode to avoid light borders
-            int useDark = 1;
-            DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref useDark, sizeof(int));
-
-            // Set border color to blend with Mica background (#1D1D20 -> 0x00201D1D)
-            int darkBorder = 0x00201D1D;
-            DwmSetWindowAttribute(hWnd, DWMWA_BORDER_COLOR, ref darkBorder, sizeof(int));
+            // DWM attributes must be applied immediately after the HWND exists,
+            // before the window is shown or restyled - otherwise the calls are
+            // silently ignored and we see the default light frame.
+            ApplyDarkFrame(hWnd);
 
             PositionWindow();
         }
+
+        private void ApplyDarkFrame(IntPtr hWnd)
+        {
+            // #1F1F1F - neutral near-black that matches the popup's flat
+            // background (#C018181A in MainWindow.xaml). DWM wants 0x00BBGGRR.
+            int darkBorder = ColorRef(0x1F, 0x1F, 0x1F);
+
+            int hr1 = DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref _useDark, sizeof(int));
+            int hr2 = DwmSetWindowAttribute(hWnd, DWMWA_BORDER_COLOR, ref darkBorder, sizeof(int));
+
+            if (hr1 != 0 || hr2 != 0)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[CodexBarWin] DwmSetWindowAttribute failed: immersiveDark={hr1}, borderColor={hr2}");
+            }
+        }
+
+        private static int _useDark = 1;
 
         private void PositionWindow()
         {
@@ -147,7 +200,7 @@ namespace CodexBarWin
         private async void LoadConfigAndRefresh()
         {
             Providers.Clear();
-            ProvidersItemsControl.ItemsSource = Providers;
+            BuildTabs();
 
             // 1. Load config from F# Core
             var config = ConfigStore.load();
@@ -166,6 +219,66 @@ namespace CodexBarWin
             foreach (var vm in viewModels)
             {
                 Providers.Add(vm);
+            }
+        }
+
+        /// <summary>
+        /// Rebuilds the tabs strip from the current Providers list. The first tab
+        /// is always "Overview"; the rest are the providers in arrival order.
+        /// </summary>
+        private void BuildTabs()
+        {
+            Tabs.Clear();
+            Tabs.Add(new ProviderTabItem(UsageProvider.Unknown, "Overview", "\uE9D9", isOverview: true));
+            // Add a placeholder tab for each known provider so the strip is stable
+            // across fetches. They'll get bound to real data once LoadConfigAndRefresh
+            // populates Providers.
+            foreach (UsageProvider provider in Enum.GetValues(typeof(UsageProvider)))
+            {
+                if (provider == UsageProvider.Unknown) continue;
+                string id = ProviderMapping.toString(provider);
+                string displayName = ProviderMapping.getDisplayName(provider);
+                // Use the same glyph the per-provider header used (EC7A was a sample).
+                // For the tab we use a generic bullet glyph; provider-specific icons
+                // can be added later.
+                Tabs.Add(new ProviderTabItem(provider, displayName, "\uE91F", isOverview: false));
+            }
+        }
+
+        private void Tab_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button btn) return;
+            if (btn.DataContext is not ProviderTabItem tab) return;
+
+            foreach (var t in Tabs) t.IsSelected = false;
+            tab.IsSelected = true;
+
+            if (tab.IsOverview)
+            {
+                OverviewMode = true;
+                SelectedProvider = null;
+            }
+            else
+            {
+                OverviewMode = false;
+                SelectedProvider = Providers.FirstOrDefault(p => p.Provider == tab.Provider);
+            }
+            BindBody();
+        }
+
+        private void BindBody()
+        {
+            // Wire the body ItemsControl to the right source.
+            OverviewBody.Visibility = OverviewMode ? Visibility.Visible : Visibility.Collapsed;
+            ProviderBody.Visibility = OverviewMode ? Visibility.Collapsed : Visibility.Visible;
+
+            if (OverviewMode)
+            {
+                OverviewList.ItemsSource = Providers;
+            }
+            else if (SelectedProvider != null)
+            {
+                ProviderList.ItemsSource = SelectedProvider.Windows;
             }
         }
 
@@ -250,24 +363,20 @@ namespace CodexBarWin
 
     public class ProviderViewModel
     {
-
         public UsageProvider Provider { get; }
         public string DisplayName { get; }
-        public double Used { get; }
-        public double Limit { get; }
-        public string Unit { get; }
-        public string ResetCountdown { get; }
         public string Status { get; }
         public bool IsMock { get; }
-        public string CostInfo { get; }
+        public string Footer { get; }
+
+        /// <summary>
+        /// Per-window rows for this provider. Single-bucket providers have
+        /// exactly one entry; multi-bucket providers (Claude, future Codex
+        /// OAuth) have two or more.
+        /// </summary>
+        public ObservableCollection<WindowViewModel> Windows { get; } = new();
 
         public Visibility IsMockVisibility => IsMock ? Visibility.Visible : Visibility.Collapsed;
-
-        public GridLength UsedStarWidth => new GridLength(Math.Max(0.001, Percent), GridUnitType.Star);
-        public GridLength RemainingStarWidth => new GridLength(Math.Max(0.001, 1.0 - Percent), GridUnitType.Star);
-
-        public double Percent => Limit > 0 ? Math.Clamp(Used / Limit, 0.0, 1.0) : 0.0;
-        public string PercentText => $"{Math.Round(Percent * 100)}%";
 
         public Brush StatusBrush => Status.ToLower() switch
         {
@@ -276,59 +385,124 @@ namespace CodexBarWin
             _ => new SolidColorBrush(Colors.Red)
         };
 
-        public Brush ProgressBarBrush
-        {
-            get
-            {
-                var gradient = new LinearGradientBrush
-                {
-                    StartPoint = new Windows.Foundation.Point(0, 0),
-                    EndPoint = new Windows.Foundation.Point(1, 0)
-                };
-
-                switch (Provider)
-                {
-                    case UsageProvider.OpenAI:
-                        gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF10A37F"), Offset = 0.0 });
-                        gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF00C9FF"), Offset = 1.0 });
-                        break;
-                    case UsageProvider.Claude:
-                        gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FFD97706"), Offset = 0.0 });
-                        gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FFF59E0B"), Offset = 1.0 });
-                        break;
-                    case UsageProvider.Gemini:
-                        gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF8B5CF6"), Offset = 0.0 });
-                        gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FFEC4899"), Offset = 1.0 });
-                        break;
-                    case UsageProvider.DeepSeek:
-                        gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF2563EB"), Offset = 0.0 });
-                        gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF1D4ED8"), Offset = 1.0 });
-                        break;
-                    case UsageProvider.Cursor:
-                        gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF0D9488"), Offset = 0.0 });
-                        gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF14B8A6"), Offset = 1.0 });
-                        break;
-                    default:
-                        gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF06B6D4"), Offset = 0.0 });
-                        gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF3B82F6"), Offset = 1.0 });
-                        break;
-                }
-
-                return gradient;
-            }
-        }
+        public Brush ProgressBarBrush => MakeProviderGradient(Provider);
 
         public ProviderViewModel(ProviderUsage usage)
         {
             Provider = usage.Provider;
             DisplayName = usage.DisplayName;
-            Used = usage.Used;
-            Limit = usage.Limit;
-            Unit = usage.Unit;
-            ResetCountdown = usage.ResetCountdown;
             Status = usage.Status;
             IsMock = usage.IsMock;
-            CostInfo = usage.CostInfo;
+            Footer = usage.Footer;
+            foreach (var w in usage.Windows)
+            {
+                Windows.Add(new WindowViewModel(w, Provider));
+            }
+        }
+
+        public static Brush MakeProviderGradient(UsageProvider provider)
+        {
+            var gradient = new LinearGradientBrush
+            {
+                StartPoint = new Windows.Foundation.Point(0, 0),
+                EndPoint = new Windows.Foundation.Point(1, 0)
+            };
+            switch (provider)
+            {
+                case UsageProvider.OpenAI:
+                    gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF10A37F"), Offset = 0.0 });
+                    gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF00C9FF"), Offset = 1.0 });
+                    break;
+                case UsageProvider.Claude:
+                    gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FFD97706"), Offset = 0.0 });
+                    gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FFF59E0B"), Offset = 1.0 });
+                    break;
+                case UsageProvider.Gemini:
+                    gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF8B5CF6"), Offset = 0.0 });
+                    gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FFEC4899"), Offset = 1.0 });
+                    break;
+                case UsageProvider.DeepSeek:
+                    gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF2563EB"), Offset = 0.0 });
+                    gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF1D4ED8"), Offset = 1.0 });
+                    break;
+                case UsageProvider.Cursor:
+                    gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF0D9488"), Offset = 0.0 });
+                    gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF14B8A6"), Offset = 1.0 });
+                    break;
+                default:
+                    gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF06B6D4"), Offset = 0.0 });
+                    gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF3B82F6"), Offset = 1.0 });
+                    break;
+            }
+            return gradient;
+        }
+    }
+
+    public class WindowViewModel
+    {
+        public string Label { get; }
+        public double UsedPercent { get; }
+        public string ResetCountdown { get; }
+        public Brush ProgressBarBrush { get; }
+
+        public double PercentFraction => Math.Clamp(UsedPercent / 100.0, 0.0, 1.0);
+        public GridLength UsedStarWidth => new GridLength(Math.Max(0.001, PercentFraction), GridUnitType.Star);
+        public GridLength RemainingStarWidth => new GridLength(Math.Max(0.001, 1.0 - PercentFraction), GridUnitType.Star);
+        public string PercentText => $"{Math.Round(UsedPercent)}%";
+        public bool HasLabel => !string.IsNullOrEmpty(Label) && Label != "Quota";
+        public Visibility LabelVisibility => HasLabel ? Visibility.Visible : Visibility.Collapsed;
+
+        public WindowViewModel(UsageWindow window, UsageProvider provider)
+        {
+            Label = window.Label;
+            UsedPercent = window.UsedPercent;
+            ResetCountdown = window.ResetCountdown;
+            ProgressBarBrush = ProviderViewModel.MakeProviderGradient(provider);
+        }
+    }
+
+    public class ProviderTabItem : INotifyPropertyChanged
+    {
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        public UsageProvider Provider { get; }
+        public string DisplayName { get; }
+        public string IconGlyph { get; }
+        public bool IsOverview { get; }
+
+        private bool _isSelected;
+        public bool IsSelected
+        {
+            get => _isSelected;
+            set
+            {
+                if (_isSelected != value)
+                {
+                    _isSelected = value;
+                    PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelected)));
+                    PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(TabBackground)));
+                }
+            }
+        }
+
+        /// <summary>
+        /// Background brush for the tab button. Computed from IsSelected so
+        /// the XAML doesn't need a value converter (which fails to bind
+        /// inside a Window's DataTemplate in WinUI 3).
+        /// </summary>
+        public Brush TabBackground => new SolidColorBrush(
+            _isSelected
+                ? ColorHelper.ToColor("FF2D2D30")
+                : Colors.Transparent);
+
+        public ProviderTabItem(UsageProvider provider, string displayName, string iconGlyph, bool isOverview)
+        {
+            Provider = provider;
+            DisplayName = displayName;
+            IconGlyph = iconGlyph;
+            IsOverview = isOverview;
+            // Overview is selected by default.
+            _isSelected = isOverview;
         }
     }
 

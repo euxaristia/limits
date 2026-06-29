@@ -74,19 +74,35 @@ type CodexBarConfig = {
     [<JsonPropertyName("providers")>] providers: ProviderConfig list
 }
 
+type UsageWindow = {
+    /// Short label shown next to the progress bar (e.g. "Session", "Weekly", "Quota").
+    Label: string
+    /// Used as a percentage in [0, 100]. Always clamped before display.
+    UsedPercent: float
+    /// Human-readable reset countdown (e.g. "3h 42m", "1d 4h", "Never Resets").
+    ResetCountdown: string
+    /// Window length in seconds, or 0 if not applicable. Reserved for future
+    /// features (pace, history) - not currently rendered in the popup.
+    WindowSeconds: int
+}
+
 type ProviderUsage = {
     Provider: UsageProvider
     Id: string
     DisplayName: string
-    Used: float
-    Limit: float
-    Unit: string
-    ResetCountdown: string
+    /// Ordered list of usage windows. Single-bucket providers emit exactly one
+    /// window; multi-bucket providers (Claude, future Codex OAuth) emit two or
+    /// more. The popup surfaces every window as its own row.
+    Windows: UsageWindow list
+    /// Status string: "healthy" | "degraded" | "unknown".
     Status: string
     IsMock: bool
     HasError: bool
     ErrorMessage: string
-    CostInfo: string
+    /// Free-form footer line (replaces the old CostInfo slot). Carries the
+    /// rich per-provider context that does not fit in a 0-100 bar (e.g.
+    /// "Plan: Pro", "$4.82 of $18.00", "Spent: $0.85").
+    Footer: string
 }
 
 module ConfigStore =
@@ -97,7 +113,7 @@ module ConfigStore =
         else
             let xdgConfig = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME")
             let home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
-            let basePath = 
+            let basePath =
                 if not (String.IsNullOrWhiteSpace(xdgConfig)) then
                     xdgConfig
                 else
@@ -203,6 +219,10 @@ module ClaudeUsageParser =
         PrimaryReset: string
         PrimaryLabel: string
         CostInfo: string
+        /// Per-bucket breakdown. Always length 0, 1, or 2; values are
+        /// pre-normalized to [0, 100] percentages.
+        Session: Bucket option
+        Weekly: Bucket option
     }
 
     /// Picks the more-pressed bucket as primary. On ties the weekly quota wins
@@ -240,15 +260,84 @@ module ClaudeUsageParser =
             PrimaryReset = primaryReset
             PrimaryLabel = primaryLabel
             CostInfo = costInfo
+            Session = if session.HasData then Some session else None
+            Weekly = if weekly.HasData then Some weekly else None
         }
 
 module UsageFetcher =
     let private client = new HttpClient()
-    
+
     // Set modern User-Agent to avoid getting blocked by Cloudflare/WAF
     let private setupHeaders (headers: HttpRequestHeaders) =
         headers.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         headers.Accept.ParseAdd("application/json, text/plain, */*")
+
+    /// Build a single-window ProviderUsage record. Most providers only have
+    /// one quota, so this centralizes the "wrap into a list" step.
+    let private singleWindow
+        (provider: UsageProvider)
+        (id: string)
+        (displayName: string)
+        (used: float)
+        (limit: float)
+        (resetCountdown: string)
+        (status: string)
+        (isMock: bool)
+        (hasError: bool)
+        (errorMessage: string)
+        (footer: string)
+        : ProviderUsage =
+        let usedPct =
+            if limit > 0.0
+            then Math.Clamp(used / limit * 100.0, 0.0, 100.0)
+            else 0.0
+        {
+            Provider = provider
+            Id = id
+            DisplayName = displayName
+            Windows = [{
+                Label = "Quota"
+                UsedPercent = usedPct
+                ResetCountdown = resetCountdown
+                WindowSeconds = 0
+            }]
+            Status = status
+            IsMock = isMock
+            HasError = hasError
+            ErrorMessage = errorMessage
+            Footer = footer
+        }
+
+    /// Build a multi-window ProviderUsage record from raw percentage values.
+    /// Each tuple is (label, usedPercent 0-100, resetCountdown, windowSeconds).
+    let private multiWindow
+        (provider: UsageProvider)
+        (id: string)
+        (displayName: string)
+        (windows: (string * float * string * int) list)
+        (status: string)
+        (isMock: bool)
+        (hasError: bool)
+        (errorMessage: string)
+        (footer: string)
+        : ProviderUsage =
+        {
+            Provider = provider
+            Id = id
+            DisplayName = displayName
+            Windows =
+                windows
+                |> List.map (fun (label, pct, reset, secs) ->
+                    { Label = label
+                      UsedPercent = Math.Clamp(pct, 0.0, 100.0)
+                      ResetCountdown = reset
+                      WindowSeconds = secs })
+            Status = status
+            IsMock = isMock
+            HasError = hasError
+            ErrorMessage = errorMessage
+            Footer = footer
+        }
 
     // 1. OpenAI Credit Grants API
     let private fetchOpenAIBalance (apiKey: string) : Task<ProviderUsage> = task {
@@ -258,7 +347,7 @@ module UsageFetcher =
             use request = new HttpRequestMessage(HttpMethod.Get, "https://api.openai.com/v1/dashboard/billing/credit_grants")
             setupHeaders request.Headers
             request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", apiKey.Trim())
-            
+
             let! response = client.SendAsync(request)
             if response.IsSuccessStatusCode then
                 let! content = response.Content.ReadAsStringAsync()
@@ -267,28 +356,22 @@ module UsageFetcher =
                 let totalGranted = root.GetProperty("total_granted").GetDouble()
                 let totalUsed = root.GetProperty("total_used").GetDouble()
                 let totalAvailable = root.GetProperty("total_available").GetDouble()
-                
-                return {
-                    Provider = provider; Id = "openai"; DisplayName = name
-                    Used = totalUsed; Limit = totalGranted; Unit = "$"
-                    ResetCountdown = "Credit Expiry"
-                    Status = "healthy"; IsMock = false; HasError = false; ErrorMessage = ""
-                    CostInfo = sprintf "Available: $%M / $%M" (decimal totalAvailable) (decimal totalGranted)
-                }
+
+                return singleWindow
+                    provider "openai" name
+                    totalUsed totalGranted
+                    "Credit Expiry" "healthy" false false ""
+                    (sprintf "Available: $%M / $%M" (decimal totalAvailable) (decimal totalGranted))
             else
-                return {
-                    Provider = provider; Id = "openai"; DisplayName = name
-                    Used = 0.0; Limit = 100.0; Unit = "$"; ResetCountdown = "N/A"
-                    Status = "degraded"; IsMock = false; HasError = true
-                    ErrorMessage = sprintf "API returned status %d" (int response.StatusCode)
-                    CostInfo = ""
-                }
+                return singleWindow
+                    provider "openai" name
+                    0.0 100.0 "N/A" "degraded" false true
+                    (sprintf "API returned status %d" (int response.StatusCode))
+                    ""
         with ex ->
-            return {
-                Provider = provider; Id = "openai"; DisplayName = name
-                Used = 0.0; Limit = 100.0; Unit = "$"; ResetCountdown = "N/A"
-                Status = "degraded"; IsMock = false; HasError = true; ErrorMessage = ex.Message; CostInfo = ""
-            }
+            return singleWindow
+                provider "openai" name
+                0.0 100.0 "N/A" "degraded" false true ex.Message ""
     }
 
     // 2. Claude Web API (using browser session cookies)
@@ -297,7 +380,7 @@ module UsageFetcher =
         let name = ProviderMapping.getDisplayName provider
         try
             // Extract sessionKey from cookie header
-            let sessionKey = 
+            let sessionKey =
                 if cookieSource.Contains("sessionKey=") then
                     let start = cookieSource.IndexOf("sessionKey=") + "sessionKey=".Length
                     let endIdx = cookieSource.IndexOf(";", start)
@@ -310,7 +393,7 @@ module UsageFetcher =
             use orgRequest = new HttpRequestMessage(HttpMethod.Get, "https://claude.ai/api/organizations")
             setupHeaders orgRequest.Headers
             orgRequest.Headers.Add("Cookie", sprintf "sessionKey=%s" sessionKey)
-            
+
             let! orgResponse = client.SendAsync(orgRequest)
             if orgResponse.IsSuccessStatusCode then
                 let! orgContent = orgResponse.Content.ReadAsStringAsync()
@@ -318,13 +401,13 @@ module UsageFetcher =
                 let orgsArray = orgDoc.RootElement
                 if orgsArray.ValueKind = JsonValueKind.Array && orgsArray.GetArrayLength() > 0 then
                     let orgId = orgsArray.[0].GetProperty("uuid").GetString()
-                    
+
                     // Step B: Fetch usage for the organization
                     let usageUrl = sprintf "https://claude.ai/api/organizations/%s/usage" orgId
                     use usageRequest = new HttpRequestMessage(HttpMethod.Get, usageUrl)
                     setupHeaders usageRequest.Headers
                     usageRequest.Headers.Add("Cookie", sprintf "sessionKey=%s" sessionKey)
-                    
+
                     let! usageResponse = client.SendAsync(usageRequest)
                     if usageResponse.IsSuccessStatusCode then
                         let! usageContent = usageResponse.Content.ReadAsStringAsync()
@@ -333,43 +416,40 @@ module UsageFetcher =
 
                         let parsed = ClaudeUsageParser.parse root
 
-                        return {
-                            Provider = provider; Id = "claude"; DisplayName = name
-                            Used = parsed.PrimaryUsed; Limit = 100.0; Unit = "%"
-                            ResetCountdown = parsed.PrimaryReset
-                            Status = "healthy"; IsMock = false; HasError = false; ErrorMessage = ""
-                            CostInfo = parsed.CostInfo
-                        }
+                        // Build the windows list: Session first, Weekly second (or just the one we have).
+                        let mutable winTuples: (string * float * string * int) list = []
+                        match parsed.Session with
+                        | Some s -> winTuples <- ("Session", s.Used, s.ResetCountdown, 5 * 3600) :: winTuples
+                        | None -> ()
+                        match parsed.Weekly with
+                        | Some w -> winTuples <- ("Weekly", w.Used, w.ResetCountdown, 7 * 24 * 3600) :: winTuples
+                        | None -> ()
+                        let windows = List.rev winTuples
+
+                        return multiWindow
+                            provider "claude" name windows
+                            "healthy" false false "" parsed.CostInfo
                     else
-                        return {
-                            Provider = provider; Id = "claude"; DisplayName = name
-                            Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
-                            Status = "degraded"; IsMock = false; HasError = true
-                            ErrorMessage = sprintf "Usage API returned HTTP %d" (int usageResponse.StatusCode)
-                            CostInfo = ""
-                        }
+                        return singleWindow
+                            provider "claude" name
+                            0.0 100.0 "N/A" "degraded" false true
+                            (sprintf "Usage API returned HTTP %d" (int usageResponse.StatusCode))
+                            ""
                 else
-                    return {
-                        Provider = provider; Id = "claude"; DisplayName = name
-                        Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
-                        Status = "degraded"; IsMock = false; HasError = true
-                        ErrorMessage = "No organization UUID found"
-                        CostInfo = ""
-                    }
+                    return singleWindow
+                        provider "claude" name
+                        0.0 100.0 "N/A" "degraded" false true
+                        "No organization UUID found" ""
             else
-                return {
-                    Provider = provider; Id = "claude"; DisplayName = name
-                    Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
-                    Status = "degraded"; IsMock = false; HasError = true
-                    ErrorMessage = sprintf "Orgs API returned HTTP %d (Invalid sessionKey?)" (int orgResponse.StatusCode)
-                    CostInfo = ""
-                }
+                return singleWindow
+                    provider "claude" name
+                    0.0 100.0 "N/A" "degraded" false true
+                    (sprintf "Orgs API returned HTTP %d (Invalid sessionKey?)" (int orgResponse.StatusCode))
+                    ""
         with ex ->
-            return {
-                Provider = provider; Id = "claude"; DisplayName = name
-                Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
-                Status = "degraded"; IsMock = false; HasError = true; ErrorMessage = ex.Message; CostInfo = ""
-            }
+            return singleWindow
+                provider "claude" name
+                0.0 100.0 "N/A" "degraded" false true ex.Message ""
     }
 
     // 3. DeepSeek User Balance API
@@ -380,7 +460,7 @@ module UsageFetcher =
             use request = new HttpRequestMessage(HttpMethod.Get, "https://api.deepseek.com/user/balance")
             setupHeaders request.Headers
             request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", apiKey.Trim())
-            
+
             let! response = client.SendAsync(request)
             if response.IsSuccessStatusCode then
                 let! content = response.Content.ReadAsStringAsync()
@@ -393,33 +473,24 @@ module UsageFetcher =
                         let balanceStr = balanceInfo.GetProperty("balance").GetString()
                         let balance = Double.Parse(balanceStr)
                         totalBalance <- totalBalance + balance
-                    
-                    return {
-                        Provider = provider; Id = "deepseek"; DisplayName = name
-                        Used = 0.0; Limit = totalBalance; Unit = "$"
-                        ResetCountdown = "Never Resets"
-                        Status = "healthy"; IsMock = false; HasError = false; ErrorMessage = ""
-                        CostInfo = sprintf "Available: $%M" (decimal totalBalance)
-                    }
+
+                    return singleWindow
+                        provider "deepseek" name
+                        0.0 totalBalance "Never Resets" "healthy" false false ""
+                        (sprintf "Available: $%M" (decimal totalBalance))
                 else
-                    return {
-                        Provider = provider; Id = "deepseek"; DisplayName = name
-                        Used = 0.0; Limit = 0.0; Unit = "$"; ResetCountdown = "N/A"
-                        Status = "degraded"; IsMock = false; HasError = true; ErrorMessage = "Account is unavailable"; CostInfo = ""
-                    }
+                    return singleWindow
+                        provider "deepseek" name
+                        0.0 0.0 "N/A" "degraded" false true "Account is unavailable" ""
             else
-                return {
-                    Provider = provider; Id = "deepseek"; DisplayName = name
-                    Used = 0.0; Limit = 0.0; Unit = "$"; ResetCountdown = "N/A"
-                    Status = "degraded"; IsMock = false; HasError = true
-                    ErrorMessage = sprintf "API returned status %d" (int response.StatusCode); CostInfo = ""
-                }
+                return singleWindow
+                    provider "deepseek" name
+                    0.0 0.0 "N/A" "degraded" false true
+                    (sprintf "API returned status %d" (int response.StatusCode)) ""
         with ex ->
-            return {
-                Provider = provider; Id = "deepseek"; DisplayName = name
-                Used = 0.0; Limit = 0.0; Unit = "$"; ResetCountdown = "N/A"
-                Status = "degraded"; IsMock = false; HasError = true; ErrorMessage = ex.Message; CostInfo = ""
-            }
+            return singleWindow
+                provider "deepseek" name
+                0.0 0.0 "N/A" "degraded" false true ex.Message ""
     }
 
     // 4. OpenRouter Key Info API
@@ -430,7 +501,7 @@ module UsageFetcher =
             use request = new HttpRequestMessage(HttpMethod.Get, "https://openrouter.ai/api/v1/auth/key")
             setupHeaders request.Headers
             request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", apiKey.Trim())
-            
+
             let! response = client.SendAsync(request)
             if response.IsSuccessStatusCode then
                 let! content = response.Content.ReadAsStringAsync()
@@ -439,27 +510,20 @@ module UsageFetcher =
                 let data = root.GetProperty("data")
                 let limit = data.GetProperty("limit").GetDouble()
                 let usage = data.GetProperty("usage").GetDouble()
-                
-                return {
-                    Provider = provider; Id = "openrouter"; DisplayName = name
-                    Used = usage; Limit = limit; Unit = "$"
-                    ResetCountdown = "Monthly Reset"
-                    Status = "healthy"; IsMock = false; HasError = false; ErrorMessage = ""
-                    CostInfo = sprintf "Used: $%M / $%M" (decimal usage) (decimal limit)
-                }
+
+                return singleWindow
+                    provider "openrouter" name
+                    usage limit "Monthly Reset" "healthy" false false ""
+                    (sprintf "Used: $%M / $%M" (decimal usage) (decimal limit))
             else
-                return {
-                    Provider = provider; Id = "openrouter"; DisplayName = name
-                    Used = 0.0; Limit = 0.0; Unit = "$"; ResetCountdown = "N/A"
-                    Status = "degraded"; IsMock = false; HasError = true
-                    ErrorMessage = sprintf "API returned status %O" response.StatusCode; CostInfo = ""
-                }
+                return singleWindow
+                    provider "openrouter" name
+                    0.0 0.0 "N/A" "degraded" false true
+                    (sprintf "API returned status %O" response.StatusCode) ""
         with ex ->
-            return {
-                Provider = provider; Id = "openrouter"; DisplayName = name
-                Used = 0.0; Limit = 0.0; Unit = "$"; ResetCountdown = "N/A"
-                Status = "degraded"; IsMock = false; HasError = true; ErrorMessage = ex.Message; CostInfo = ""
-            }
+            return singleWindow
+                provider "openrouter" name
+                0.0 0.0 "N/A" "degraded" false true ex.Message ""
     }
 
     // 5. Gemini Private Quota API (loads credentials from local gcloud/gemini-cli workspace)
@@ -469,35 +533,35 @@ module UsageFetcher =
         try
             let userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
             let credsPath = Path.Combine(userProfile, ".gemini", "oauth_creds.json")
-            
+
             if File.Exists(credsPath) then
                 let credsJson = File.ReadAllText(credsPath)
                 use doc = JsonDocument.Parse(credsJson)
                 let root = doc.RootElement
-                
+
                 let mutable accessTokenProp = new JsonElement()
                 if root.TryGetProperty("access_token", &accessTokenProp) then
                     let accessToken = accessTokenProp.GetString()
-                    
+
                     // Call the retrieveUserQuota RPC endpoint
                     use request = new HttpRequestMessage(HttpMethod.Post, "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota")
                     setupHeaders request.Headers
                     request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", accessToken)
                     request.Content <- new StringContent("{}", System.Text.Encoding.UTF8, "application/json")
-                    
+
                     let! response = client.SendAsync(request)
                     if response.IsSuccessStatusCode then
                         let! content = response.Content.ReadAsStringAsync()
                         use quotaDoc = JsonDocument.Parse(content)
                         let quotaRoot = quotaDoc.RootElement
-                        
+
                         let mutable lowestFraction = 1.0
                         let mutable resetTime = "Daily Quota"
-                        
+
                         let mutable bucketsProp = new JsonElement()
                         let mutable fractionProp = new JsonElement()
                         let mutable resetProp = new JsonElement()
-                        
+
                         if quotaRoot.TryGetProperty("buckets", &bucketsProp) && bucketsProp.ValueKind = JsonValueKind.Array then
                             for bucket in bucketsProp.EnumerateArray() do
                                 if bucket.TryGetProperty("remainingFraction", &fractionProp) then
@@ -506,40 +570,30 @@ module UsageFetcher =
                                         lowestFraction <- fraction
                                 if bucket.TryGetProperty("resetTime", &resetProp) then
                                     resetTime <- DateParser.formatCountdown (resetProp.GetString())
-                                    
+
                         let usedPercent = (1.0 - lowestFraction) * 100.0
-                        return {
-                            Provider = provider; Id = "gemini"; DisplayName = name
-                            Used = usedPercent; Limit = 100.0; Unit = "%"
-                            ResetCountdown = resetTime
-                            Status = "healthy"; IsMock = false; HasError = false; ErrorMessage = ""
-                            CostInfo = "Google Code Assist Quota"
-                        }
+                        return singleWindow
+                            provider "gemini" name
+                            usedPercent 100.0 resetTime "healthy" false false ""
+                            "Google Code Assist Quota"
                     else
-                        return {
-                            Provider = provider; Id = "gemini"; DisplayName = name
-                            Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
-                            Status = "degraded"; IsMock = false; HasError = true
-                            ErrorMessage = sprintf "Quota API returned status %d" (int response.StatusCode)
-                            CostInfo = ""
-                        }
+                        return singleWindow
+                            provider "gemini" name
+                            0.0 100.0 "N/A" "degraded" false true
+                            (sprintf "Quota API returned status %d" (int response.StatusCode))
+                            ""
                 else
-                    return {
-                        Provider = provider; Id = "gemini"; DisplayName = name
-                        Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
-                        Status = "degraded"; IsMock = false; HasError = true
-                        ErrorMessage = "Credentials file missing access_token"
-                        CostInfo = ""
-                    }
+                    return singleWindow
+                        provider "gemini" name
+                        0.0 100.0 "N/A" "degraded" false true
+                        "Credentials file missing access_token" ""
             else
                 // No credentials file found - generate mock telemetry
                 return getMockData provider
         with ex ->
-            return {
-                Provider = provider; Id = "gemini"; DisplayName = name
-                Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
-                Status = "degraded"; IsMock = false; HasError = true; ErrorMessage = ex.Message; CostInfo = ""
-            }
+            return singleWindow
+                provider "gemini" name
+                0.0 100.0 "N/A" "degraded" false true ex.Message ""
     }
 
     // Generates high-fidelity mock data if api key is missing
@@ -548,38 +602,51 @@ module UsageFetcher =
         let id = ProviderMapping.toString provider
         match provider with
         | UsageProvider.Codex ->
-            { Provider = provider; Id = id; DisplayName = name; Used = 142.0; Limit = 500.0; Unit = "reqs"
-              ResetCountdown = "1h 42m"; Status = "healthy"; IsMock = true; HasError = false; ErrorMessage = ""; CostInfo = "Plan: Pro" }
+            singleWindow provider id name
+                142.0 500.0 "1h 42m" "healthy" true false ""
+                "Plan: Pro"
         | UsageProvider.OpenAI ->
-            { Provider = provider; Id = id; DisplayName = name; Used = 4.82; Limit = 18.0; Unit = "$"
-              ResetCountdown = "Resets in 2d"; Status = "healthy"; IsMock = true; HasError = false; ErrorMessage = ""; CostInfo = "Spent: $4.82 of $18.00" }
+            singleWindow provider id name
+                4.82 18.0 "Resets in 2d" "healthy" true false ""
+                "Spent: $4.82 of $18.00"
         | UsageProvider.Claude ->
-            { Provider = provider; Id = id; DisplayName = name; Used = 28.0; Limit = 50.0; Unit = "msgs"
-              ResetCountdown = "4h 12m"; Status = "healthy"; IsMock = true; HasError = false; ErrorMessage = ""; CostInfo = "Plan: Claude Pro" }
+            // Mock Claude: surface a Session + Weekly split so the multi-window
+            // UI has something realistic to render for unmocked-Claude users.
+            multiWindow provider id name
+                [("Session", 56.0, "4h 12m", 5 * 3600);
+                 ("Weekly", 28.0, "5d 6h", 7 * 24 * 3600)]
+                "healthy" true false "" "Plan: Claude Pro"
         | UsageProvider.Cursor ->
-            { Provider = provider; Id = id; DisplayName = name; Used = 384.0; Limit = 500.0; Unit = "fast"
-              ResetCountdown = "Resets July 5"; Status = "healthy"; IsMock = true; HasError = false; ErrorMessage = ""; CostInfo = "384 / 500 fast requests" }
+            singleWindow provider id name
+                384.0 500.0 "Resets July 5" "healthy" true false ""
+                "384 / 500 fast requests"
         | UsageProvider.Gemini ->
-            { Provider = provider; Id = id; DisplayName = name; Used = 60.0; Limit = 100.0; Unit = "%"
-              ResetCountdown = "Daily Quota"; Status = "healthy"; IsMock = true; HasError = false; ErrorMessage = ""; CostInfo = "RPM: 15 / 360" }
+            singleWindow provider id name
+                60.0 100.0 "Daily Quota" "healthy" true false ""
+                "RPM: 15 / 360"
         | UsageProvider.DeepSeek ->
-            { Provider = provider; Id = id; DisplayName = name; Used = 2.15; Limit = 15.0; Unit = "$"
-              ResetCountdown = "Never Resets"; Status = "healthy"; IsMock = true; HasError = false; ErrorMessage = ""; CostInfo = "Balance: $12.85 available" }
+            singleWindow provider id name
+                2.15 15.0 "Never Resets" "healthy" true false ""
+                "Balance: $12.85 available"
         | UsageProvider.OpenRouter ->
-            { Provider = provider; Id = id; DisplayName = name; Used = 0.85; Limit = 5.0; Unit = "$"
-              ResetCountdown = "Monthly Reset"; Status = "healthy"; IsMock = true; HasError = false; ErrorMessage = ""; CostInfo = "Spent: $0.85" }
+            singleWindow provider id name
+                0.85 5.0 "Monthly Reset" "healthy" true false ""
+                "Spent: $0.85"
         | UsageProvider.ElevenLabs ->
-            { Provider = provider; Id = id; DisplayName = name; Used = 42500.0; Limit = 100000.0; Unit = "chars"
-              ResetCountdown = "Resets in 12d"; Status = "healthy"; IsMock = true; HasError = false; ErrorMessage = ""; CostInfo = "42,500 characters used" }
+            singleWindow provider id name
+                42500.0 100000.0 "Resets in 12d" "healthy" true false ""
+                "42,500 characters used"
         | UsageProvider.Groq ->
-            { Provider = provider; Id = id; DisplayName = name; Used = 65.0; Limit = 100.0; Unit = "reqs"
-              ResetCountdown = "Minute Limit"; Status = "healthy"; IsMock = true; HasError = false; ErrorMessage = ""; CostInfo = "65 / 100 requests" }
+            singleWindow provider id name
+                65.0 100.0 "Minute Limit" "healthy" true false ""
+                "65 / 100 requests"
         | UsageProvider.Bedrock ->
-            { Provider = provider; Id = id; DisplayName = name; Used = 12.45; Limit = 50.0; Unit = "$"
-              ResetCountdown = "Billing Cycle"; Status = "healthy"; IsMock = true; HasError = false; ErrorMessage = ""; CostInfo = "Cost this month: $12.45" }
+            singleWindow provider id name
+                12.45 50.0 "Billing Cycle" "healthy" true false ""
+                "Cost this month: $12.45"
         | _ ->
-            { Provider = provider; Id = id; DisplayName = name; Used = 0.0; Limit = 100.0; Unit = "%"
-              ResetCountdown = "Unknown"; Status = "unknown"; IsMock = true; HasError = false; ErrorMessage = ""; CostInfo = "" }
+            singleWindow provider id name
+                0.0 100.0 "Unknown" "unknown" true false "" ""
 
     // 2b. Claude OAuth API (from local Claude CLI credentials)
     let private fetchClaudeOAuthUsage (accessToken: string) : Task<ProviderUsage> = task {
@@ -590,7 +657,7 @@ module UsageFetcher =
             setupHeaders request.Headers
             request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", accessToken.Trim())
             request.Headers.Add("anthropic-beta", "oauth-2025-04-20")
-            
+
             let! response = client.SendAsync(request)
             if response.IsSuccessStatusCode then
                 let! content = response.Content.ReadAsStringAsync()
@@ -599,36 +666,37 @@ module UsageFetcher =
 
                 let parsed = ClaudeUsageParser.parse root
 
-                return {
-                    Provider = provider; Id = "claude"; DisplayName = name
-                    Used = parsed.PrimaryUsed; Limit = 100.0; Unit = "%"
-                    ResetCountdown = parsed.PrimaryReset
-                    Status = "healthy"; IsMock = false; HasError = false; ErrorMessage = ""
-                    CostInfo = parsed.CostInfo
-                }
+                let mutable winTuples: (string * float * string * int) list = []
+                match parsed.Session with
+                | Some s -> winTuples <- ("Session", s.Used, s.ResetCountdown, 5 * 3600) :: winTuples
+                | None -> ()
+                match parsed.Weekly with
+                | Some w -> winTuples <- ("Weekly", w.Used, w.ResetCountdown, 7 * 24 * 3600) :: winTuples
+                | None -> ()
+                let windows = List.rev winTuples
+
+                return multiWindow
+                    provider "claude" name windows
+                    "healthy" false false "" parsed.CostInfo
             else
-                return {
-                    Provider = provider; Id = "claude"; DisplayName = name
-                    Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
-                    Status = "degraded"; IsMock = false; HasError = true
-                    ErrorMessage = sprintf "OAuth API returned HTTP %d" (int response.StatusCode)
-                    CostInfo = ""
-                }
+                return singleWindow
+                    provider "claude" name
+                    0.0 100.0 "N/A" "degraded" false true
+                    (sprintf "OAuth API returned HTTP %d" (int response.StatusCode))
+                    ""
         with ex ->
-            return {
-                Provider = provider; Id = "claude"; DisplayName = name
-                Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
-                Status = "degraded"; IsMock = false; HasError = true; ErrorMessage = ex.Message; CostInfo = ""
-            }
+            return singleWindow
+                provider "claude" name
+                0.0 100.0 "N/A" "degraded" false true ex.Message ""
     }
 
     let fetch (config: ProviderConfig) : Task<ProviderUsage> = task {
         let provider = ProviderMapping.fromString config.id
-        
+
         // Check keys/cookies
         let hasApiKey = not (String.IsNullOrWhiteSpace(config.apiKey))
         let hasCookie = not (String.IsNullOrWhiteSpace(config.cookieHeader))
-        
+
         match provider with
         | UsageProvider.OpenAI when hasApiKey ->
             return! fetchOpenAIBalance config.apiKey
@@ -659,9 +727,9 @@ module UsageFetcher =
                         return getMockData provider
                 else
                     return getMockData provider
-        | UsageProvider.DeepSeek when hasApiKey -> 
+        | UsageProvider.DeepSeek when hasApiKey ->
             return! fetchDeepSeekBalance config.apiKey
-        | UsageProvider.OpenRouter when hasApiKey -> 
+        | UsageProvider.OpenRouter when hasApiKey ->
             return! fetchOpenRouterBalance config.apiKey
         | UsageProvider.Gemini ->
             return! fetchGeminiUsage ()
