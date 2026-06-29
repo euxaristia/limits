@@ -24,6 +24,12 @@ namespace CodexBarWin
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
 
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+        private const int DWMWA_BORDER_COLOR = 34;
+
         private readonly TaskbarIcon _taskbarIcon;
         private bool _isExiting = false;
 
@@ -73,6 +79,14 @@ namespace CodexBarWin
                 presenter.IsResizable = false;
                 presenter.SetBorderAndTitleBar(false, false);
             }
+
+            // Force immersive dark mode to avoid light borders
+            int useDark = 1;
+            DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref useDark, sizeof(int));
+
+            // Set border color to blend with Mica background (#1D1D20 -> 0x00201D1D)
+            int darkBorder = 0x00201D1D;
+            DwmSetWindowAttribute(hWnd, DWMWA_BORDER_COLOR, ref darkBorder, sizeof(int));
 
             PositionWindow();
         }
