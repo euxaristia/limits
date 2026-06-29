@@ -164,6 +164,84 @@ module DateParser =
                     sprintf "%dm" minutes
         | _ -> "Unknown"
 
+module ClaudeUsageParser =
+    // Claude /usage returns two sibling buckets: a rolling 5-hour session
+    // and a 7-day weekly quota. The bar can only surface a single primary
+    // number, so we surface the more-pressed bucket as `Used` and pack both
+    // values into `CostInfo` so neither is hidden.
+    type Bucket = {
+        HasData: bool
+        Used: float
+        ResetCountdown: string
+    }
+
+    let private empty = { HasData = false; Used = 0.0; ResetCountdown = "Never Resets" }
+
+    let private normalizeUtilization (raw: float) : float =
+        // API may return either a fraction (0..1) or a percentage (0..100+).
+        if raw > 0.0 && raw <= 1.0 then raw * 100.0 else raw
+
+    let private readBucket (parent: JsonElement) (name: string) : Bucket =
+        let mutable prop = new JsonElement()
+        if parent.TryGetProperty(name, &prop) && prop.ValueKind <> JsonValueKind.Null then
+            let mutable util = new JsonElement()
+            let mutable resets = new JsonElement()
+            let mutable used = 0.0
+            if prop.TryGetProperty("utilization", &util) && util.ValueKind <> JsonValueKind.Null then
+                used <- normalizeUtilization (util.GetDouble())
+            let mutable countdown = "Never Resets"
+            if prop.TryGetProperty("resets_at", &resets) && resets.ValueKind <> JsonValueKind.Null then
+                let s = resets.GetString()
+                if not (String.IsNullOrEmpty(s)) then
+                    countdown <- DateParser.formatCountdown s
+            { HasData = true; Used = used; ResetCountdown = countdown }
+        else
+            empty
+
+    type ParseResult = {
+        PrimaryUsed: float
+        PrimaryReset: string
+        PrimaryLabel: string
+        CostInfo: string
+    }
+
+    /// Picks the more-pressed bucket as primary. On ties the weekly quota wins
+    /// (lower per-hour burn rate -> the more informative "watch this one").
+    let parse (root: JsonElement) : ParseResult =
+        let session = readBucket root "five_hour"
+        let weekly = readBucket root "seven_day"
+
+        let sessionPct = if session.HasData then Math.Round(session.Used, 1) else Double.NaN
+        let weeklyPct = if weekly.HasData then Math.Round(weekly.Used, 1) else Double.NaN
+
+        let primaryPct, primaryReset, primaryLabel =
+            match session.HasData, weekly.HasData with
+            | false, false ->
+                0.0, "Never Resets", "Claude Plan"
+            | true, false ->
+                session.Used, session.ResetCountdown, "5-hour session quota"
+            | false, true ->
+                weekly.Used, weekly.ResetCountdown, "7-day weekly quota"
+            | true, true ->
+                if weekly.Used >= session.Used then
+                    weekly.Used, weekly.ResetCountdown, "7-day weekly quota"
+                else
+                    session.Used, session.ResetCountdown, "5-hour session quota"
+
+        let costInfo =
+            match session.HasData, weekly.HasData with
+            | true, true ->
+                sprintf "Session: %g%% \u00B7 7-day: %g%%" sessionPct weeklyPct
+            | _ ->
+                primaryLabel
+
+        {
+            PrimaryUsed = Math.Clamp(primaryPct, 0.0, 100.0)
+            PrimaryReset = primaryReset
+            PrimaryLabel = primaryLabel
+            CostInfo = costInfo
+        }
+
 module UsageFetcher =
     let private client = new HttpClient()
     
@@ -252,39 +330,15 @@ module UsageFetcher =
                         let! usageContent = usageResponse.Content.ReadAsStringAsync()
                         use usageDoc = JsonDocument.Parse(usageContent)
                         let root = usageDoc.RootElement
-                        
-                        let mutable used = 0.0
-                        let mutable resetsAt = "Never Resets"
-                        let mutable costInfo = "Claude Plan"
-                        
-                        // Parse five_hour (session) usage
-                        let mutable fiveHourProp = new JsonElement()
-                        let mutable sevenDayProp = new JsonElement()
-                        let mutable utilProp = new JsonElement()
-                        let mutable resetsProp = new JsonElement()
-                        
-                        if root.TryGetProperty("five_hour", &fiveHourProp) && fiveHourProp.ValueKind <> JsonValueKind.Null then
-                            if fiveHourProp.TryGetProperty("utilization", &utilProp) then
-                                used <- utilProp.GetDouble() * 100.0 // utilization is fraction in some accounts or percent
-                            if fiveHourProp.TryGetProperty("resets_at", &resetsProp) then
-                                resetsAt <- DateParser.formatCountdown (resetsProp.GetString())
-                            costInfo <- "5-hour session quota"
-                        elif root.TryGetProperty("seven_day", &sevenDayProp) && sevenDayProp.ValueKind <> JsonValueKind.Null then
-                            if sevenDayProp.TryGetProperty("utilization", &utilProp) then
-                                used <- utilProp.GetDouble() * 100.0
-                            if sevenDayProp.TryGetProperty("resets_at", &resetsProp) then
-                                resetsAt <- DateParser.formatCountdown (resetsProp.GetString())
-                            costInfo <- "7-day weekly quota"
-                            
-                        // Bound used percent
-                        used <- Math.Clamp(used, 0.0, 100.0)
-                        
+
+                        let parsed = ClaudeUsageParser.parse root
+
                         return {
                             Provider = provider; Id = "claude"; DisplayName = name
-                            Used = used; Limit = 100.0; Unit = "%"
-                            ResetCountdown = resetsAt
+                            Used = parsed.PrimaryUsed; Limit = 100.0; Unit = "%"
+                            ResetCountdown = parsed.PrimaryReset
                             Status = "healthy"; IsMock = false; HasError = false; ErrorMessage = ""
-                            CostInfo = costInfo
+                            CostInfo = parsed.CostInfo
                         }
                     else
                         return {
@@ -542,39 +596,15 @@ module UsageFetcher =
                 let! content = response.Content.ReadAsStringAsync()
                 use doc = JsonDocument.Parse(content)
                 let root = doc.RootElement
-                
-                let mutable used = 0.0
-                let mutable resetsAt = "Never Resets"
-                let mutable costInfo = "Claude Code Session"
-                
-                let mutable fiveHourProp = new JsonElement()
-                let mutable sevenDayProp = new JsonElement()
-                let mutable utilProp = new JsonElement()
-                let mutable resetsProp = new JsonElement()
-                
-                if root.TryGetProperty("five_hour", &fiveHourProp) && fiveHourProp.ValueKind <> JsonValueKind.Null then
-                    if fiveHourProp.TryGetProperty("utilization", &utilProp) then
-                        let value = utilProp.GetDouble()
-                        used <- if value > 0.0 && value <= 1.0 then value * 100.0 else value
-                    if fiveHourProp.TryGetProperty("resets_at", &resetsProp) then
-                        resetsAt <- DateParser.formatCountdown (resetsProp.GetString())
-                    costInfo <- "5-hour session quota"
-                elif root.TryGetProperty("seven_day", &sevenDayProp) && sevenDayProp.ValueKind <> JsonValueKind.Null then
-                    if sevenDayProp.TryGetProperty("utilization", &utilProp) then
-                        let value = utilProp.GetDouble()
-                        used <- if value > 0.0 && value <= 1.0 then value * 100.0 else value
-                    if sevenDayProp.TryGetProperty("resets_at", &resetsProp) then
-                        resetsAt <- DateParser.formatCountdown (resetsProp.GetString())
-                    costInfo <- "7-day weekly quota"
-                    
-                used <- Math.Clamp(used, 0.0, 100.0)
-                
+
+                let parsed = ClaudeUsageParser.parse root
+
                 return {
                     Provider = provider; Id = "claude"; DisplayName = name
-                    Used = used; Limit = 100.0; Unit = "%"
-                    ResetCountdown = resetsAt
+                    Used = parsed.PrimaryUsed; Limit = 100.0; Unit = "%"
+                    ResetCountdown = parsed.PrimaryReset
                     Status = "healthy"; IsMock = false; HasError = false; ErrorMessage = ""
-                    CostInfo = costInfo
+                    CostInfo = parsed.CostInfo
                 }
             else
                 return {
