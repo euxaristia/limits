@@ -527,6 +527,71 @@ module UsageFetcher =
             { Provider = provider; Id = id; DisplayName = name; Used = 0.0; Limit = 100.0; Unit = "%"
               ResetCountdown = "Unknown"; Status = "unknown"; IsMock = true; HasError = false; ErrorMessage = ""; CostInfo = "" }
 
+    // 2b. Claude OAuth API (from local Claude CLI credentials)
+    let private fetchClaudeOAuthUsage (accessToken: string) : Task<ProviderUsage> = task {
+        let provider = UsageProvider.Claude
+        let name = ProviderMapping.getDisplayName provider
+        try
+            use request = new HttpRequestMessage(HttpMethod.Get, "https://api.anthropic.com/api/oauth/usage")
+            setupHeaders request.Headers
+            request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", accessToken.Trim())
+            request.Headers.Add("anthropic-beta", "oauth-2025-04-20")
+            
+            let! response = client.SendAsync(request)
+            if response.IsSuccessStatusCode then
+                let! content = response.Content.ReadAsStringAsync()
+                use doc = JsonDocument.Parse(content)
+                let root = doc.RootElement
+                
+                let mutable used = 0.0
+                let mutable resetsAt = "Never Resets"
+                let mutable costInfo = "Claude Code Session"
+                
+                let mutable fiveHourProp = new JsonElement()
+                let mutable sevenDayProp = new JsonElement()
+                let mutable utilProp = new JsonElement()
+                let mutable resetsProp = new JsonElement()
+                
+                if root.TryGetProperty("five_hour", &fiveHourProp) && fiveHourProp.ValueKind <> JsonValueKind.Null then
+                    if fiveHourProp.TryGetProperty("utilization", &utilProp) then
+                        let value = utilProp.GetDouble()
+                        used <- if value > 0.0 && value <= 1.0 then value * 100.0 else value
+                    if fiveHourProp.TryGetProperty("resets_at", &resetsProp) then
+                        resetsAt <- DateParser.formatCountdown (resetsProp.GetString())
+                    costInfo <- "5-hour session quota"
+                elif root.TryGetProperty("seven_day", &sevenDayProp) && sevenDayProp.ValueKind <> JsonValueKind.Null then
+                    if sevenDayProp.TryGetProperty("utilization", &utilProp) then
+                        let value = utilProp.GetDouble()
+                        used <- if value > 0.0 && value <= 1.0 then value * 100.0 else value
+                    if sevenDayProp.TryGetProperty("resets_at", &resetsProp) then
+                        resetsAt <- DateParser.formatCountdown (resetsProp.GetString())
+                    costInfo <- "7-day weekly quota"
+                    
+                used <- Math.Clamp(used, 0.0, 100.0)
+                
+                return {
+                    Provider = provider; Id = "claude"; DisplayName = name
+                    Used = used; Limit = 100.0; Unit = "%"
+                    ResetCountdown = resetsAt
+                    Status = "healthy"; IsMock = false; HasError = false; ErrorMessage = ""
+                    CostInfo = costInfo
+                }
+            else
+                return {
+                    Provider = provider; Id = "claude"; DisplayName = name
+                    Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
+                    Status = "degraded"; IsMock = false; HasError = true
+                    ErrorMessage = sprintf "OAuth API returned HTTP %d" (int response.StatusCode)
+                    CostInfo = ""
+                }
+        with ex ->
+            return {
+                Provider = provider; Id = "claude"; DisplayName = name
+                Used = 0.0; Limit = 100.0; Unit = "%"; ResetCountdown = "N/A"
+                Status = "degraded"; IsMock = false; HasError = true; ErrorMessage = ex.Message; CostInfo = ""
+            }
+    }
+
     let fetch (config: ProviderConfig) : Task<ProviderUsage> = task {
         let provider = ProviderMapping.fromString config.id
         
@@ -537,9 +602,33 @@ module UsageFetcher =
         match provider with
         | UsageProvider.OpenAI when hasApiKey ->
             return! fetchOpenAIBalance config.apiKey
-        | UsageProvider.Claude when hasCookie || hasApiKey ->
-            let token = if hasCookie then config.cookieHeader else config.apiKey
-            return! fetchClaudeUsage token
+        | UsageProvider.Claude ->
+            if hasCookie || hasApiKey then
+                let token = if hasCookie then config.cookieHeader else config.apiKey
+                return! fetchClaudeUsage token
+            else
+                // Auto-fallback: try reading ~/.claude/.credentials.json
+                let userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+                let credsPath = Path.Combine(userProfile, ".claude", ".credentials.json")
+                if File.Exists(credsPath) then
+                    try
+                        let json = File.ReadAllText(credsPath)
+                        use doc = JsonDocument.Parse(json)
+                        let root = doc.RootElement
+                        let mutable oauthProp = new JsonElement()
+                        let mutable tokenProp = new JsonElement()
+                        if root.TryGetProperty("claudeAiOauth", &oauthProp) && oauthProp.TryGetProperty("accessToken", &tokenProp) then
+                            let token = tokenProp.GetString()
+                            if not (String.IsNullOrWhiteSpace(token)) then
+                                return! fetchClaudeOAuthUsage token
+                            else
+                                return getMockData provider
+                        else
+                            return getMockData provider
+                    with _ ->
+                        return getMockData provider
+                else
+                    return getMockData provider
         | UsageProvider.DeepSeek when hasApiKey -> 
             return! fetchDeepSeekBalance config.apiKey
         | UsageProvider.OpenRouter when hasApiKey -> 
