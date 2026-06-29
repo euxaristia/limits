@@ -9,6 +9,7 @@
   <ItemGroup>
     <Compile Include="ClaudeUsageParserTests.fs" />
     <Compile Include="ProviderUsageShapeTests.fs" />
+    <Compile Include="AntigravityUsageParserTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

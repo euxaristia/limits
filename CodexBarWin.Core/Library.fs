@@ -20,6 +20,7 @@ type UsageProvider =
     | Groq = 8
     | Bedrock = 9
     | Unknown = 10
+    | Antigravity = 11
 
 module ProviderMapping =
     let toString = function
@@ -33,6 +34,7 @@ module ProviderMapping =
         | UsageProvider.ElevenLabs -> "elevenlabs"
         | UsageProvider.Groq -> "groq"
         | UsageProvider.Bedrock -> "bedrock"
+        | UsageProvider.Antigravity -> "antigravity"
         | _ -> "unknown"
 
     let fromString = function
@@ -46,6 +48,7 @@ module ProviderMapping =
         | "elevenlabs" -> UsageProvider.ElevenLabs
         | "groq" -> UsageProvider.Groq
         | "bedrock" -> UsageProvider.Bedrock
+        | "antigravity" -> UsageProvider.Antigravity
         | _ -> UsageProvider.Unknown
 
     let getDisplayName = function
@@ -59,6 +62,7 @@ module ProviderMapping =
         | UsageProvider.ElevenLabs -> "ElevenLabs"
         | UsageProvider.Groq -> "Groq"
         | UsageProvider.Bedrock -> "AWS Bedrock"
+        | UsageProvider.Antigravity -> "Antigravity"
         | _ -> "Unknown"
 
 type ProviderConfig = {
@@ -130,6 +134,7 @@ module ConfigStore =
             { id = "deepseek"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
             { id = "openrouter"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
             { id = "elevenlabs"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
+            { id = "antigravity"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
         ]
         { version = 1; providers = defaultProviders }
 
@@ -162,6 +167,107 @@ module ConfigStore =
         with _ ->
             ()
 
+module AntigravityCredentials =
+    // Reads the OAuth token that the Antigravity CLI / IDE store in the
+    // Windows Credential Manager. The credential is a UTF-8 JSON blob
+    // shaped like:
+    //   { "token": { "access_token", "token_type", "refresh_token", "expiry" },
+    //     "auth_method": "consumer" | ... }
+    //
+    // TargetName is `LegacyGeneric:target=gemini:antigravity` (verified via
+    // `cmdkey /list`). UserName is `antigravity`. Persistence is local
+    // machine, so the same creds are visible to every user-mode process.
+    //
+    // We P/Invoke advapi32!CredRead directly instead of taking a NuGet
+    // dependency (e.g. Meziantou.Framework.Win32.CredentialManager) to
+    // keep the dependency surface minimal. The DllImport shape mirrors
+    // the Win32 CREDENTIAL struct (CRED_TYPE_GENERIC = 1).
+    open System.Runtime.InteropServices
+
+    [<Literal>]
+    let private TargetName = "LegacyGeneric:target=gemini:antigravity"
+
+    [<Literal>]
+    let private CredTypeGeneric = 1u
+
+    // Win32 interop declarations live in Win32.fs - F# struct syntax does
+    // not allow [StructLayout] on a type with a primary constructor, and
+    // member val fields require one. The CREDENTIAL struct and CredRead/
+    // CredFree P/Invokes are declared there.
+
+    exception AntigravityCredentialsError of string
+
+    type Token = {
+        AccessToken: string
+        RefreshToken: string
+        Expiry: DateTime option
+        AuthMethod: string
+    }
+
+    let load () : Token =
+        let mutable credPtr = System.IntPtr.Zero
+        let ok =
+            try Win32.CredRead(TargetName, CredTypeGeneric, 0u, &credPtr)
+            with ex ->
+                raise (AntigravityCredentialsError(sprintf "CredRead Win32 call threw: %s" ex.Message))
+        if not ok then
+            let err = Marshal.GetLastWin32Error()
+            // 1168 = ERROR_NOT_FOUND, 1312 = ERROR_NO_SUCH_LOGON_SESSION. Both mean
+            // "no credential stored" from the caller's perspective.
+            if err = 1168 || err = 1312 then
+                raise (AntigravityCredentialsError("No Antigravity credential found. Sign in via the Antigravity IDE or `agy` CLI."))
+            else
+                raise (AntigravityCredentialsError(sprintf "CredRead failed with Win32 error %d" err))
+        try
+            let cred = Marshal.PtrToStructure(credPtr, typeof<CREDENTIAL>) :?> CREDENTIAL
+            let size = int cred.CredentialBlobSize
+            if size <= 0 || cred.CredentialBlob = System.IntPtr.Zero then
+                raise (AntigravityCredentialsError("Antigravity credential blob is empty"))
+            let bytes : byte[] = Array.zeroCreate size
+            Marshal.Copy(cred.CredentialBlob, bytes, 0, size)
+            let json = System.Text.Encoding.UTF8.GetString(bytes)
+            use doc = JsonDocument.Parse(json)
+            let root = doc.RootElement
+            let mutable tokenProp = new JsonElement()
+            if not (root.TryGetProperty("token", &tokenProp)) || tokenProp.ValueKind <> JsonValueKind.Object then
+                raise (AntigravityCredentialsError("Antigravity credential missing 'token' object"))
+            let mutable accessProp = new JsonElement()
+            if not (tokenProp.TryGetProperty("access_token", &accessProp)) || accessProp.ValueKind <> JsonValueKind.String then
+                raise (AntigravityCredentialsError("Antigravity credential missing 'token.access_token' string"))
+            let accessToken = accessProp.GetString()
+            if String.IsNullOrEmpty(accessToken) then
+                raise (AntigravityCredentialsError("Antigravity credential has empty access_token"))
+
+            let refreshToken =
+                let mutable p = new JsonElement()
+                if tokenProp.TryGetProperty("refresh_token", &p) && p.ValueKind = JsonValueKind.String
+                then p.GetString() else ""
+
+            let expiry =
+                let mutable p = new JsonElement()
+                if tokenProp.TryGetProperty("expiry", &p) && p.ValueKind = JsonValueKind.String then
+                    let s = p.GetString()
+                    if not (String.IsNullOrEmpty(s)) then
+                        match DateTime.TryParse(s) with
+                        | true, d -> Some d
+                        | _ -> None
+                    else None
+                else None
+
+            let authMethod =
+                let mutable p = new JsonElement()
+                if root.TryGetProperty("auth_method", &p) && p.ValueKind = JsonValueKind.String
+                then p.GetString() else "unknown"
+
+            {
+                AccessToken = accessToken
+                RefreshToken = refreshToken
+                Expiry = expiry
+                AuthMethod = authMethod
+            }
+        finally
+            Win32.CredFree(credPtr)
+
 module DateParser =
     let formatCountdown (resetsAtStr: string) =
         match DateTime.TryParse(resetsAtStr) with
@@ -179,6 +285,68 @@ module DateParser =
                 else
                     sprintf "%dm" minutes
         | _ -> "Unknown"
+
+module AntigravityUsageParser =
+    // Parses the response of
+    //   POST https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota
+    // The shape is `{ buckets: [{ modelId?, remainingFraction, resetTime }, ...] }`
+    // (same backend as the Gemini fetcher, but Antigravity returns one bucket
+    // per model rather than collapsing). Each bucket becomes a UsageWindow
+    // so the UI can render them as separate rows.
+
+    type Bucket = {
+        ModelId: string
+        RemainingFraction: float
+        UsedPercent: float
+        ResetCountdown: string
+    }
+
+    let empty = {
+        ModelId = ""
+        RemainingFraction = 1.0
+        UsedPercent = 0.0
+        ResetCountdown = "Never Resets"
+    }
+
+    let private parseBucket (parent: JsonElement) : Bucket option =
+        let mutable remainingProp = new JsonElement()
+        if not (parent.TryGetProperty("remainingFraction", &remainingProp)) || remainingProp.ValueKind <> JsonValueKind.Number then
+            None
+        else
+            let remaining = remainingProp.GetDouble()
+            let used = Math.Clamp((1.0 - remaining) * 100.0, 0.0, 100.0)
+
+            let mutable modelIdProp = new JsonElement()
+            let modelId =
+                if parent.TryGetProperty("modelId", &modelIdProp) && modelIdProp.ValueKind = JsonValueKind.String
+                then modelIdProp.GetString()
+                else ""
+
+            let mutable resetProp = new JsonElement()
+            let reset =
+                if parent.TryGetProperty("resetTime", &resetProp) && resetProp.ValueKind = JsonValueKind.String
+                then
+                    let s = resetProp.GetString()
+                    if not (String.IsNullOrEmpty(s)) then DateParser.formatCountdown s else "Never Resets"
+                else "Never Resets"
+
+            Some {
+                ModelId = modelId
+                RemainingFraction = remaining
+                UsedPercent = used
+                ResetCountdown = reset
+            }
+
+    /// Parses the full retrieveUserQuota response into a list of buckets.
+    /// Returns an empty list if the response shape is unrecognised.
+    let parse (root: JsonElement) : Bucket list =
+        let mutable bucketsProp = new JsonElement()
+        if not (root.TryGetProperty("buckets", &bucketsProp)) || bucketsProp.ValueKind <> JsonValueKind.Array then
+            []
+        else
+            bucketsProp.EnumerateArray()
+            |> Seq.choose parseBucket
+            |> Seq.toList
 
 module ClaudeUsageParser =
     // Claude /usage returns two sibling buckets: a rolling 5-hour session
@@ -596,6 +764,65 @@ module UsageFetcher =
                 0.0 100.0 "N/A" "degraded" false true ex.Message ""
     }
 
+    // 6. Antigravity (Google Cloud Code Assist) - reads OAuth from Windows
+    // Credential Manager and calls the same retrieveUserQuota endpoint as
+    // the Gemini fetcher. Each bucket becomes its own UsageWindow.
+    and private fetchAntigravityUsage () : Task<ProviderUsage> = task {
+        let provider = UsageProvider.Antigravity
+        let name = ProviderMapping.getDisplayName provider
+        try
+            let token = AntigravityCredentials.load ()
+
+            // Same Cloud Code Assist backend as Gemini.
+            use request = new HttpRequestMessage(HttpMethod.Post, "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota")
+            setupHeaders request.Headers
+            request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", token.AccessToken)
+            request.Content <- new StringContent("{}", System.Text.Encoding.UTF8, "application/json")
+
+            let! response = client.SendAsync(request)
+            if response.IsSuccessStatusCode then
+                let! content = response.Content.ReadAsStringAsync()
+                use doc = JsonDocument.Parse(content)
+                let buckets = AntigravityUsageParser.parse doc.RootElement
+
+                if List.isEmpty buckets then
+                    // Quota endpoint reachable but no buckets returned.
+                    return singleWindow
+                        provider "antigravity" name
+                        0.0 100.0 "N/A" "healthy" false false ""
+                        (sprintf "Antigravity (%s)" token.AuthMethod)
+                else
+                    let windows =
+                        buckets
+                        |> List.map (fun b ->
+                            let label = if String.IsNullOrEmpty b.ModelId then "Quota" else b.ModelId
+                            (label, b.UsedPercent, b.ResetCountdown, 0))
+                    let email = ""
+                    let footer =
+                        sprintf "Antigravity (%s) - %d bucket%s"
+                            token.AuthMethod
+                            (List.length buckets)
+                            (if List.length buckets = 1 then "" else "s")
+                    return multiWindow
+                        provider "antigravity" name windows
+                        "healthy" false false "" footer
+            else
+                return singleWindow
+                    provider "antigravity" name
+                    0.0 100.0 "N/A" "degraded" false true
+                    (sprintf "Antigravity API returned status %d" (int response.StatusCode))
+                    ""
+        with
+        | :? AntigravityCredentials.AntigravityCredentialsError as credErr ->
+            return singleWindow
+                provider "antigravity" name
+                0.0 100.0 "N/A" "degraded" false true credErr.Message ""
+        | ex ->
+            return singleWindow
+                provider "antigravity" name
+                0.0 100.0 "N/A" "degraded" false true ex.Message ""
+    }
+
     // Generates high-fidelity mock data if api key is missing
     and getMockData (provider: UsageProvider) : ProviderUsage =
         let name = ProviderMapping.getDisplayName provider
@@ -733,6 +960,8 @@ module UsageFetcher =
             return! fetchOpenRouterBalance config.apiKey
         | UsageProvider.Gemini ->
             return! fetchGeminiUsage ()
+        | UsageProvider.Antigravity ->
+            return! fetchAntigravityUsage ()
         | _ ->
             return getMockData provider
     }
