@@ -108,3 +108,41 @@ let ``Empty resets_at string is ignored`` () =
     let r = parseJson json
     Assert.Equal(50.0, r.PrimaryUsed, 1)
     Assert.Equal("Never Resets", r.PrimaryReset)
+
+[<Fact>]
+let ``Both buckets present: Session and Weekly fields both populated with raw values`` () =
+    let futureReset = DateTime.UtcNow.AddHours(4.0).ToString("o")
+    let laterReset = DateTime.UtcNow.AddDays(5.0).ToString("o")
+    let json = sprintf """{ "five_hour": %s, "seven_day": %s }""" (bucket 0.45 futureReset) (bucket 0.20 laterReset)
+    let r = parseJson json
+    Assert.True(r.Session.IsSome, "Session bucket should be present")
+    Assert.True(r.Weekly.IsSome, "Weekly bucket should be present")
+    let s = r.Session |> Option.get
+    let w = r.Weekly |> Option.get
+    Assert.Equal(45.0, s.Used, 1)
+    Assert.Equal(20.0, w.Used, 1)
+    Assert.True(s.HasData)
+    Assert.True(w.HasData)
+
+[<Fact>]
+let ``Only session bucket: Session populated, Weekly is None`` () =
+    let futureReset = DateTime.UtcNow.AddHours(2.0).ToString("o")
+    let json = sprintf """{ "five_hour": %s }""" (bucket 0.33 futureReset)
+    let r = parseJson json
+    Assert.True(r.Session.IsSome)
+    Assert.True(r.Weekly.IsNone)
+
+[<Fact>]
+let ``Only weekly bucket: Weekly populated, Session is None`` () =
+    let laterReset = DateTime.UtcNow.AddDays(3.0).ToString("o")
+    let json = sprintf """{ "seven_day": %s }""" (bucket 0.66 laterReset)
+    let r = parseJson json
+    Assert.True(r.Session.IsNone)
+    Assert.True(r.Weekly.IsSome)
+    Assert.Equal(66.0, (r.Weekly |> Option.get).Used, 1)
+
+[<Fact>]
+let ``No buckets: both Session and Weekly are None`` () =
+    let r = parseJson "{}"
+    Assert.True(r.Session.IsNone)
+    Assert.True(r.Weekly.IsNone)
