@@ -86,8 +86,8 @@ namespace CodexBarWin
             var displayArea = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(windowId, Microsoft.UI.Windowing.DisplayAreaFallback.Primary);
             RectInt32 bounds = displayArea.WorkArea;
 
-            int width = 360;
-            int height = 500;
+            int width = 420;
+            int height = 620;
 
             // Position at bottom-right corner (just above the system tray)
             int x = bounds.X + bounds.Width - width - 12;
