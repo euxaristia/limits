@@ -200,13 +200,17 @@ namespace CodexBarWin
         private async void LoadConfigAndRefresh()
         {
             Providers.Clear();
-            BuildTabs();
 
             // 1. Load config from F# Core
             var config = ConfigStore.load();
 
             // 2. Map enabled providers to viewmodels
             var activeConfigs = config.providers.Where(p => p.enabled.HasValue && p.enabled.Value).ToList();
+
+            // Build the tabs strip from the enabled providers only, so tabs and
+            // body stay in sync. Disabled providers are intentionally hidden from
+            // the strip - they can be enabled via the Settings panel.
+            BuildTabs(activeConfigs.Select(ac => ProviderMapping.fromString(ac.id)).ToList());
 
             // Create view models
             var tasks = activeConfigs.Select(async providerConfig =>
@@ -223,24 +227,17 @@ namespace CodexBarWin
         }
 
         /// <summary>
-        /// Rebuilds the tabs strip from the current Providers list. The first tab
-        /// is always "Overview"; the rest are the providers in arrival order.
+        /// Builds the tabs strip. The first tab is always "Overview"; the rest
+        /// are the providers in the order they appear in the loaded config
+        /// (filtered to enabled-only by the caller).
         /// </summary>
-        private void BuildTabs()
+        private void BuildTabs(List<UsageProvider> enabledProviders)
         {
             Tabs.Clear();
             Tabs.Add(new ProviderTabItem(UsageProvider.Unknown, "Overview", "\uE9D9", isOverview: true));
-            // Add a placeholder tab for each known provider so the strip is stable
-            // across fetches. They'll get bound to real data once LoadConfigAndRefresh
-            // populates Providers.
-            foreach (UsageProvider provider in Enum.GetValues(typeof(UsageProvider)))
+            foreach (var provider in enabledProviders)
             {
-                if (provider == UsageProvider.Unknown) continue;
-                string id = ProviderMapping.toString(provider);
                 string displayName = ProviderMapping.getDisplayName(provider);
-                // Use the same glyph the per-provider header used (EC7A was a sample).
-                // For the tab we use a generic bullet glyph; provider-specific icons
-                // can be added later.
                 Tabs.Add(new ProviderTabItem(provider, displayName, "\uE91F", isOverview: false));
             }
         }

@@ -54,7 +54,9 @@
             <ScrollViewer x:Name="DashboardPanel" Visibility="Visible" Padding="16,8,16,16" VerticalScrollBarVisibility="Auto">
                 <StackPanel Spacing="12">
                     <!-- Tab strip: horizontal list of provider chips. First chip
-                         is "Overview"; rest are the configured providers. -->
+                         is "Overview"; rest are the configured (enabled) providers.
+                         Height is 56 to leave room for the horizontal scrollbar
+                         beneath the chip row rather than superimposed over it. -->
                     <ListView x:Name="TabsList"
                               ItemsSource="{x:Bind Tabs}"
                               SelectionMode="None"
@@ -63,7 +65,8 @@
                               ScrollViewer.HorizontalScrollBarVisibility="Auto"
                               ScrollViewer.VerticalScrollMode="Disabled"
                               ScrollViewer.VerticalScrollBarVisibility="Disabled"
-                              Height="40">
+                              Height="56"
+                              Padding="0,0,0,12">
                         <ListView.ItemsPanel>
                             <ItemsPanelTemplate>
                                 <StackPanel Orientation="Horizontal" Spacing="4" />
