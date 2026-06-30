@@ -9,8 +9,10 @@ using System.Threading.Tasks;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.FSharp.Core;
 using Windows.Graphics;
 using Windows.UI;
 using H.NotifyIcon;
@@ -220,7 +222,10 @@ namespace CodexBarWin
             });
 
             var viewModels = await Task.WhenAll(tasks);
-            foreach (var vm in viewModels)
+            // Sort alphabetically by display name so the tab strip (built
+            // above from activeConfigs) and the Overview body (bound to
+            // Providers) show the same order.
+            foreach (var vm in viewModels.OrderBy(vm => vm.DisplayName, StringComparer.OrdinalIgnoreCase))
             {
                 Providers.Add(vm);
             }
@@ -235,7 +240,10 @@ namespace CodexBarWin
         {
             Tabs.Clear();
             Tabs.Add(new ProviderTabItem(UsageProvider.Unknown, "Overview", "\uE9D9", isOverview: true));
-            foreach (var provider in enabledProviders)
+            // Sort enabled providers alphabetically by display name so the
+            // tab strip and the Overview body both show a stable, predictable
+            // order regardless of how the user edited config.json.
+            foreach (var provider in enabledProviders.OrderBy(ProviderMapping.getDisplayName, StringComparer.OrdinalIgnoreCase))
             {
                 string displayName = ProviderMapping.getDisplayName(provider);
                 Tabs.Add(new ProviderTabItem(provider, displayName, "\uE91F", isOverview: false));
@@ -441,11 +449,17 @@ namespace CodexBarWin
         public double UsedPercent { get; }
         public string ResetCountdown { get; }
         public Brush ProgressBarBrush { get; }
+        /// Optional override of the percent text shown in the UI row.
+        /// When null, the UI uses PercentText (rounded UsedPercent%).
+        /// Antigravity sets this to "X% remaining" to match the CLI.
+        public FSharpOption<string> PercentTextOverride { get; }
 
         public double PercentFraction => Math.Clamp(UsedPercent / 100.0, 0.0, 1.0);
         public GridLength UsedStarWidth => new GridLength(Math.Max(0.001, PercentFraction), GridUnitType.Star);
         public GridLength RemainingStarWidth => new GridLength(Math.Max(0.001, 1.0 - PercentFraction), GridUnitType.Star);
-        public string PercentText => $"{Math.Round(UsedPercent)}%";
+        public string PercentText => PercentTextOverride == null
+            ? $"{Math.Round(UsedPercent)}%"
+            : PercentTextOverride.Value;
         public bool HasLabel => !string.IsNullOrEmpty(Label) && Label != "Quota";
         public Visibility LabelVisibility => HasLabel ? Visibility.Visible : Visibility.Collapsed;
 
@@ -455,6 +469,9 @@ namespace CodexBarWin
             UsedPercent = window.UsedPercent;
             ResetCountdown = window.ResetCountdown;
             ProgressBarBrush = ProviderViewModel.MakeProviderGradient(provider);
+            // F# string option marshals as FSharpOption<string>. XAML can
+            // bind to FSharpOption's Value property or to a null check.
+            PercentTextOverride = window.PercentTextOverride;
         }
     }
 

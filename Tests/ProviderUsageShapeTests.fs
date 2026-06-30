@@ -20,6 +20,7 @@ module Contract =
                 UsedPercent = 27.0
                 ResetCountdown = "Resets in 2d"
                 WindowSeconds = 0
+                PercentTextOverride = None
             }]
             Status = "healthy"
             IsMock = false
@@ -37,8 +38,8 @@ module Contract =
             Id = "claude"
             DisplayName = "Claude"
             Windows = [
-                { Label = "Session"; UsedPercent = 2.0; ResetCountdown = "3h 53m"; WindowSeconds = 5 * 3600 }
-                { Label = "Weekly"; UsedPercent = 3.0; ResetCountdown = "3d 20h"; WindowSeconds = 7 * 24 * 3600 }
+                { Label = "Session"; UsedPercent = 2.0; ResetCountdown = "3h 53m"; WindowSeconds = 5 * 3600; PercentTextOverride = None }
+                { Label = "Weekly"; UsedPercent = 3.0; ResetCountdown = "3d 20h"; WindowSeconds = 7 * 24 * 3600; PercentTextOverride = None }
             ]
             Status = "healthy"
             IsMock = false
@@ -57,6 +58,7 @@ module Contract =
             UsedPercent = 56.7
             ResetCountdown = "4h 12m"
             WindowSeconds = 18000
+            PercentTextOverride = None
         }
         Assert.Equal("Session", w.Label)
         Assert.Equal(56.7, w.UsedPercent)
@@ -69,12 +71,12 @@ module Contract =
 module WindowSecondsContract =
     [<Fact>]
     let ``Single-bucket provider window carries WindowSeconds = 0`` () =
-        let w: UsageWindow = { Label = "Quota"; UsedPercent = 50.0; ResetCountdown = "1h"; WindowSeconds = 0 }
+        let w: UsageWindow = { Label = "Quota"; UsedPercent = 50.0; ResetCountdown = "1h"; WindowSeconds = 0; PercentTextOverride = None }
         Assert.Equal(0, w.WindowSeconds)
 
     [<Fact>]
     let ``Multi-bucket provider windows carry real window lengths`` () =
-        let session: UsageWindow = { Label = "Session"; UsedPercent = 50.0; ResetCountdown = "1h"; WindowSeconds = 5 * 3600 }
-        let weekly: UsageWindow = { Label = "Weekly"; UsedPercent = 50.0; ResetCountdown = "1d"; WindowSeconds = 7 * 24 * 3600 }
+        let session: UsageWindow = { Label = "Session"; UsedPercent = 50.0; ResetCountdown = "1h"; WindowSeconds = 5 * 3600; PercentTextOverride = None }
+        let weekly: UsageWindow = { Label = "Weekly"; UsedPercent = 50.0; ResetCountdown = "1d"; WindowSeconds = 7 * 24 * 3600; PercentTextOverride = None }
         Assert.Equal(18000, session.WindowSeconds)
         Assert.Equal(604800, weekly.WindowSeconds)
