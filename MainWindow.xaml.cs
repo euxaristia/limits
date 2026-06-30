@@ -86,8 +86,21 @@ namespace CodexBarWin
                 IconSource = new BitmapImage(new Uri("ms-appx:///Assets/AppIcon.ico")),
                 ToolTipText = "CodexBar"
             };
+            // Left-click toggles the popup. Right-click shows a context menu
+            // with a Quit option (built in BuildTrayContextMenu below).
+            // We do NOT set RightClickCommand here - setting both the
+            // command and a ContextFlyout causes H.NotifyIcon WinUI to
+            // try to dispatch the right-click twice, which crashes the
+            // XAML runtime. The library's ContextMenuMode auto-shows the
+            // flyout on right-click.
             _taskbarIcon.LeftClickCommand = new RelayCommand(() => ToggleWindow());
-            _taskbarIcon.RightClickCommand = new RelayCommand(() => ToggleWindow());
+            // SecondWindow hosts the flyout in a real XAML window that
+            // follows the app's theme. The flyout is sized to its
+            // content via FlyoutPresenterStyle with a wide MinWidth and
+            // an explicit ScrollViewer.HorizontalScrollBarVisibility =
+            // Disabled so the content isn't clipped behind a scrollbar.
+            _taskbarIcon.ContextMenuMode = H.NotifyIcon.ContextMenuMode.SecondWindow;
+            _taskbarIcon.ContextFlyout = BuildTrayContextMenu();
             _taskbarIcon.ForceCreate();
 
             // Custom deactivation behavior (hide when user clicks away)
@@ -197,6 +210,15 @@ namespace CodexBarWin
                 appWindow.Show();
                 SetForegroundWindow(hWnd);
             }
+        }
+
+        private void ShowWindow()
+        {
+            IntPtr hWnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            var appWindow = this.AppWindow;
+            PositionWindow();
+            appWindow.Show();
+            SetForegroundWindow(hWnd);
         }
 
         private async void LoadConfigAndRefresh()
@@ -345,6 +367,60 @@ namespace CodexBarWin
         {
             DashboardPanel.Visibility = Visibility.Visible;
             SettingsPanel.Visibility = Visibility.Collapsed;
+        }
+
+        private Microsoft.UI.Xaml.Controls.Primitives.FlyoutBase BuildTrayContextMenu()
+        {
+            // Build the context menu for right-clicking the tray icon.
+            // - Open CodexBar: show the popup
+            // - Quit: exit the app
+            //
+            // The flyout is hosted by the library's SecondWindow (a real
+            // XAML window that follows the app's theme). Without a
+            // FlyoutPresenterStyle the default ScrollViewer wraps the
+            // content in a fixed-width container, and "Open CodexBar"
+            // gets clipped behind a horizontal scrollbar. We override
+            // ScrollViewer.HorizontalScrollBarVisibility = Disabled and
+            // set MinWidth on the FlyoutPresenter so the content's
+            // natural width drives the flyout size.
+            var menu = new Microsoft.UI.Xaml.Controls.MenuFlyout();
+            var openItem = new Microsoft.UI.Xaml.Controls.MenuFlyoutItem
+            {
+                Text = "Open CodexBar",
+                Width = 200
+            };
+            openItem.Click += (s, e) => ShowWindow();
+            var quitItem = new Microsoft.UI.Xaml.Controls.MenuFlyoutItem
+            {
+                Text = "Quit",
+                Width = 200
+            };
+            quitItem.Click += (s, e) => ExitButton_Click(s, new RoutedEventArgs());
+            menu.Items.Add(openItem);
+            menu.Items.Add(new Microsoft.UI.Xaml.Controls.MenuFlyoutSeparator());
+            menu.Items.Add(quitItem);
+            // Apply a presenter style that disables horizontal scrolling
+            // and gives the content enough room for "Open CodexBar" plus
+            // its icon + chevron padding. The MinWidth 200 fits the
+            // longest label comfortably; the Items wrap onto one row
+            // because the ScrollViewer no longer constrains them.
+            //
+            // In WinUI 3 the type is Microsoft.UI.Xaml.Controls.FlyoutPresenter
+            // (not .Primitives.FlyoutPresenter like UWP) and the property
+            // is MenuFlyout.MenuFlyoutPresenterStyle (not FlyoutPresenterStyle).
+            var presenterStyle = new Microsoft.UI.Xaml.Style(
+                typeof(Microsoft.UI.Xaml.Controls.FlyoutPresenter));
+            presenterStyle.Setters.Add(new Microsoft.UI.Xaml.Setter(
+                Microsoft.UI.Xaml.Controls.FlyoutPresenter.MinWidthProperty,
+                200.0));
+            presenterStyle.Setters.Add(new Microsoft.UI.Xaml.Setter(
+                Microsoft.UI.Xaml.Controls.ScrollViewer.HorizontalScrollBarVisibilityProperty,
+                Microsoft.UI.Xaml.Controls.ScrollBarVisibility.Disabled));
+            presenterStyle.Setters.Add(new Microsoft.UI.Xaml.Setter(
+                Microsoft.UI.Xaml.Controls.ScrollViewer.VerticalScrollBarVisibilityProperty,
+                Microsoft.UI.Xaml.Controls.ScrollBarVisibility.Disabled));
+            menu.MenuFlyoutPresenterStyle = presenterStyle;
+            return menu;
         }
 
         private void ExitButton_Click(object sender, RoutedEventArgs e)

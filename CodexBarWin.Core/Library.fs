@@ -293,35 +293,41 @@ module DateParser =
 
 module AntigravityUsageParser =
     // Parses the response of
-    //   POST https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels
-    // and groups models into shared quota windows.
+    //   POST https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota
+    // and groups buckets into shared (family, window) pairs.
     //
-    // Response shape:
-    //   { "models": { "<modelId>": {
-    //       "displayName": "Gemini 2.5 Pro",
-    //       "label": "...",
-    //       "modelProvider": "MODEL_PROVIDER_GOOGLE" | "MODEL_PROVIDER_ANTHROPIC" | ...,
-    //       "quotaInfo": { "remainingFraction"?: number, "resetTime"?: string }
-    //   } } }
+    // Response shape (verified against live agy credentials):
+    //   { "buckets": [
+    //     { "modelId": "gemini-2.5-pro",
+    //       "remainingFraction": 0.9735987,
+    //       "resetTime": "2026-06-30T11:56:23Z",
+    //       "tokenType": "WTUS" },
+    //     { "modelId": "claude-opus-4-6-thinking",
+    //       "remainingFraction": 0,
+    //       "resetTime": "2026-07-01T01:54:33Z" },
+    //     { "modelId": "chat_23310",
+    //       "remainingFraction": 1,    // no resetTime = placeholder model
+    //       "tokenType": "WTUS" }
+    //   ] }
     //
-    // Two filters: drop internal placeholder models (chat_*, tab_*,
-    // MODEL_PLACEHOLDER_*, no displayName) and drop entries with no
-    // quotaInfo. Then group by (modelProvider, resetTime) - models in the
-    // same group share both - and produce one Bucket per group.
+    // For your account this returns ~20 entries with 2-3 distinct resetTimes
+    // (5h and weekly), and the API's "remainingFraction" is the right
+    // metric to display on the bar (matching the agy CLI's "% remaining"
+    // direction).
     //
-    // Bar value is the group's remainingFraction (or 0 if missing, which
-    // means the window is hit - the CLI shows this as 0.00% with a red
-    // bar and a "limit hit" message). This matches what the `agy models`
-    // CLI displays.
+    // Each modelId encodes its family (gemini-*, claude-*, gpt-oss-*) and
+    // tier (low/medium/high/thinking/extra-low). We don't try to reverse
+    // the API's internal tier naming back to user-facing labels - the
+    // CLI does that via its "family" derivation in Swift. For the popup
+    // we just group by family + reset time, dedupe duplicate modelIds,
+    // and drop placeholder models (chat_*, tab_*).
 
     type Bucket = {
-        /// Short family label derived from modelProvider: "Gemini", "Claude & GPT", etc.
+        /// Short family label derived from modelId: "Gemini", "Claude & GPT", etc.
         GroupLabel: string
-        /// First displayName in the group, used as the row label fallback.
-        PrimaryModel: string
-        /// Comma-separated list of display names in the group.
+        /// Comma-separated list of model IDs in the group.
         Members: string
-        /// 0..100, 0 means "fully consumed" (limit hit or no fraction in response).
+        /// 0..100, 0 means "fully consumed" (limit hit).
         UsedPercent: float
         /// 0..100, what the CLI shows on the bar (remainingFraction * 100).
         RemainingPercent: float
@@ -330,121 +336,78 @@ module AntigravityUsageParser =
 
     let empty = {
         GroupLabel = "Quota"
-        PrimaryModel = ""
         Members = ""
         UsedPercent = 0.0
         RemainingPercent = 0.0
         ResetCountdown = "Never Resets"
     }
 
-    let private getStringField (parent: JsonElement) (name: string) : string =
-        let mutable p = new JsonElement()
-        if parent.TryGetProperty(name, &p) && p.ValueKind = JsonValueKind.String
-        then p.GetString()
-        else ""
+    let private familyFromModelId (modelId: string) : string =
+        let m = (if String.IsNullOrEmpty modelId then "" else modelId).ToLowerInvariant()
+        if m.StartsWith("gemini-") || m.Contains("gemini") then "Gemini"
+        elif m.StartsWith("claude-") || m.Contains("claude") then "Claude & GPT"
+        elif m.StartsWith("gpt-") || m.StartsWith("gpt_") then "Claude & GPT"
+        elif m.StartsWith("chat_") || m.StartsWith("tab_") then "Internal"
+        else "Antigravity"
 
-    let private getDisplayName (parent: JsonElement) (modelId: string) : string =
-        let dn = getStringField parent "displayName"
-        if not (String.IsNullOrEmpty dn) then dn
-        else
-            let lbl = getStringField parent "label"
-            if not (String.IsNullOrEmpty lbl) then lbl
-            else modelId
-
-    let private providerToGroup (provider: string) : string =
-        match provider with
-        | "MODEL_PROVIDER_GOOGLE" -> "Gemini"
-        | "MODEL_PROVIDER_ANTHROPIC" -> "Claude & GPT"
-        | "MODEL_PROVIDER_OPENAI" -> "Claude & GPT"
-        | p when not (String.IsNullOrEmpty p) -> p.Replace("MODEL_PROVIDER_", "")
-        | _ -> "Antigravity"
-
-    let private parseQuotaInfo (parent: JsonElement) : (float option * string) option =
-        let mutable qiProp = new JsonElement()
-        if not (parent.TryGetProperty("quotaInfo", &qiProp)) || qiProp.ValueKind <> JsonValueKind.Object then
-            None
-        else
-            let mutable remainingProp = new JsonElement()
-            let remaining =
-                if qiProp.TryGetProperty("remainingFraction", &remainingProp) && remainingProp.ValueKind = JsonValueKind.Number
-                then Some (remainingProp.GetDouble())
-                else None
-            let reset =
-                let mutable p = new JsonElement()
-                if qiProp.TryGetProperty("resetTime", &p) && p.ValueKind = JsonValueKind.String
-                then
-                    let s = p.GetString()
-                    if not (String.IsNullOrEmpty(s)) then DateParser.formatCountdown s else "Never Resets"
-                else "Never Resets"
-            Some (remaining, reset)
-
-    /// A single raw model entry: the (key, displayName, modelProvider,
-    /// remainingFraction, resetTime) tuple. We collect these first then
-    /// group them, so that groups are stable.
-    type private RawEntry = {
+    /// A single raw bucket entry from retrieveUserQuota.
+    type private RawBucket = {
         ModelId: string
-        DisplayName: string
-        ModelProvider: string
-        RemainingFraction: float option
+        Family: string
+        RemainingFraction: float
         ResetCountdown: string
     }
 
-    let private parseRawModel (modelId: string) (parent: JsonElement) : RawEntry option =
-        let displayName = getDisplayName parent modelId
-        let modelProvider = getStringField parent "modelProvider"
-        // Filter placeholder models: chat_*, tab_*, MODEL_PLACEHOLDER_*
-        let mid = (if String.IsNullOrEmpty modelId then "" else modelId).ToLowerInvariant()
-        if mid.StartsWith("chat_") || mid.StartsWith("tab_") || mid.StartsWith("model_placeholder_") then
-            None
+    let private parseBucket (parent: JsonElement) : RawBucket option =
+        let mutable idProp = new JsonElement()
+        let modelId =
+            if parent.TryGetProperty("modelId", &idProp) && idProp.ValueKind = JsonValueKind.String
+            then idProp.GetString()
+            else ""
+        if String.IsNullOrEmpty modelId then None
         else
-            // Filter Google "image" variants (e.g. "Gemini 3.1 Flash Image")
-            // - the CLI's Switch Model menu hides these, and the API
-            // exposes them as a separate capability-gated endpoint.
-            if modelProvider = "MODEL_PROVIDER_GOOGLE" && mid.Contains("image") then
-                None
+            let m = modelId.ToLowerInvariant()
+            // Drop placeholder/internal models: chat_*, tab_*.
+            if m.StartsWith("chat_") || m.StartsWith("tab_") then None
             else
-                // Skip Gemini 2.x models - the CLI hides the older generation
-                // once Gemini 3.x is available.
-                if modelProvider = "MODEL_PROVIDER_GOOGLE" && mid.Contains("gemini-2") then
-                    None
-                else
-                    match parseQuotaInfo parent with
-                    | None -> None
-                    | Some (remaining, reset) ->
-                        Some {
-                            ModelId = modelId
-                            DisplayName = displayName
-                            ModelProvider = modelProvider
-                            RemainingFraction = remaining
-                            ResetCountdown = reset
-                        }
+                let mutable remProp = new JsonElement()
+                let remaining =
+                    if parent.TryGetProperty("remainingFraction", &remProp) && remProp.ValueKind = JsonValueKind.Number
+                    then remProp.GetDouble()
+                    else 0.0
+                let mutable resetProp = new JsonElement()
+                let reset =
+                    if parent.TryGetProperty("resetTime", &resetProp) && resetProp.ValueKind = JsonValueKind.String
+                    then
+                        let s = resetProp.GetString()
+                        if not (String.IsNullOrEmpty(s)) then DateParser.formatCountdown s else "Never Resets"
+                    else "Never Resets"
+                Some {
+                    ModelId = modelId
+                    Family = familyFromModelId modelId
+                    RemainingFraction = remaining
+                    ResetCountdown = reset
+                }
 
-    let private groupKey (entry: RawEntry) : string =
-        // Same GroupLabel AND same reset time = same group. GroupLabel is
-        // derived from modelProvider (e.g. MODEL_PROVIDER_ANTHROPIC and
-        // MODEL_PROVIDER_OPENAI both collapse to "Claude & GPT"), so this
-        // key keeps the user's mental model intact: one row per
-        // (family, window) pair, not one row per (provider, window).
-        providerToGroup entry.ModelProvider + "|" + entry.ResetCountdown
-
-    /// Parses the full fetchAvailableModels response into a list of
-    /// grouped buckets. Filters out placeholder models and entries with
-    /// no quotaInfo. Groups by (modelProvider, resetTime).
+    /// Parses the full retrieveUserQuota response into a list of grouped
+    /// buckets. Drops placeholder models and entries with no modelId.
+    /// Groups by (family, resetTime) - the API's resetTime field is the
+    /// authoritative window length (5h vs weekly).
     let parse (root: JsonElement) : Bucket list =
-        let mutable modelsProp = new JsonElement()
-        if not (root.TryGetProperty("models", &modelsProp)) || modelsProp.ValueKind <> JsonValueKind.Object then
+        let mutable bucketsProp = new JsonElement()
+        if not (root.TryGetProperty("buckets", &bucketsProp)) || bucketsProp.ValueKind <> JsonValueKind.Array then
             []
         else
             let raws =
-                modelsProp.EnumerateObject()
-                |> Seq.choose (fun prop -> parseRawModel prop.Name prop.Value)
+                bucketsProp.EnumerateArray()
+                |> Seq.choose parseBucket
                 |> Seq.toList
-            // Group by key
-            let groups = System.Collections.Generic.Dictionary<string, RawEntry list>()
+            // Group by (family, resetCountdown)
+            let groups = System.Collections.Generic.Dictionary<string, RawBucket list>()
             for entry in raws do
-                let k = groupKey entry
+                let k = entry.Family + "|" + entry.ResetCountdown
                 if groups.ContainsKey k then
-                    let mutable existing : RawEntry list = Unchecked.defaultof<_>
+                    let mutable existing : RawBucket list = Unchecked.defaultof<_>
                     if groups.TryGetValue(k, &existing) then
                         groups.[k] <- entry :: existing
                 else
@@ -454,46 +417,26 @@ module AntigravityUsageParser =
             for kv in groups do
                 let entries = kv.Value
                 let first = List.head entries
-                let groupLabel = providerToGroup first.ModelProvider
-                // Sort entries by remaining fraction ascending so the
-                // most-used model is listed first.
-                let sorted =
-                    entries
-                    |> List.sortBy (fun e ->
-                        match e.RemainingFraction with
-                        | Some f -> f
-                        | None -> 1.0)
-                // Dedupe by displayName - Google's API returns multiple
-                // modelId entries for the same user-facing model (e.g.
-                // "gemini-2.5-flash" and "gemini-2.5-flash-thinking" both
-                // surface as "Gemini 3.1 Flash Lite"). Keep only the first
-                // occurrence of each displayName within a group.
-                let sortedByName =
-                    sorted
-                    |> List.ofSeq
-                    |> List.distinctBy (fun e -> e.DisplayName)
-                let memberNames =
-                    sortedByName
-                    |> List.map (fun e -> e.DisplayName)
-                    |> String.concat ", "
-                let primaryModel = (List.head sortedByName).DisplayName
                 // Group's remainingFraction = the MIN of all members'
                 // remainingFraction (most-pressed), since they share the
-                // quota. If any member has no fraction, the group is
-                // considered hit (0% remaining).
+                // quota. The API's `retrieveUserQuota` returns the same
+                // remainingFraction across all members of a window because
+                // they share it, so min/max/avg are equivalent.
                 let remaining =
-                    if List.exists (fun e -> e.RemainingFraction.IsNone) entries then
-                        0.0
-                    else
-                        entries
-                        |> List.map (fun e -> e.RemainingFraction |> Option.defaultValue 0.0)
-                        |> List.min
+                    entries
+                    |> List.map (fun e -> e.RemainingFraction)
+                    |> List.min
                 let used = Math.Clamp((1.0 - remaining) * 100.0, 0.0, 100.0)
                 let remainingPct = Math.Clamp(remaining * 100.0, 0.0, 100.0)
+                let memberIds =
+                    entries
+                    |> List.map (fun e -> e.ModelId)
+                    |> List.distinct
+                    |> List.sort
+                    |> String.concat ", "
                 result <- {
-                    GroupLabel = groupLabel
-                    PrimaryModel = primaryModel
-                    Members = memberNames
+                    GroupLabel = first.Family
+                    Members = memberIds
                     UsedPercent = used
                     RemainingPercent = remainingPct
                     ResetCountdown = first.ResetCountdown
@@ -517,7 +460,7 @@ module ClaudeUsageParser =
         // API may return either a fraction (0..1) or a percentage (0..100+).
         if raw > 0.0 && raw <= 1.0 then raw * 100.0 else raw
 
-    let private readBucket (parent: JsonElement) (name: string) : Bucket =
+    let private readBucket (parent: JsonElement) (name: string) (defaultWindowLabel: string) (defaultWindow: TimeSpan) : Bucket =
         let mutable prop = new JsonElement()
         if parent.TryGetProperty(name, &prop) && prop.ValueKind <> JsonValueKind.Null then
             let mutable util = new JsonElement()
@@ -529,7 +472,25 @@ module ClaudeUsageParser =
             if prop.TryGetProperty("resets_at", &resets) && resets.ValueKind <> JsonValueKind.Null then
                 let s = resets.GetString()
                 if not (String.IsNullOrEmpty(s)) then
-                    countdown <- DateParser.formatCountdown s
+                    let parsed = DateParser.formatCountdown s
+                    // formatCountdown returns "Unknown" when DateTime.TryParse
+                    // fails. In that case the server gave us something we
+                    // can't interpret - fall back to the window's nominal
+                    // length rather than showing the user a perpetually-
+                    // broken reset.
+                    if parsed <> "Unknown" then
+                        countdown <- parsed
+                    else
+                        countdown <- sprintf "in %s" (DateParser.formatCountdown (DateTime.UtcNow.Add(defaultWindow).ToString("o")))
+                else
+                    // Empty resets_at string - fall back to the window's
+                    // nominal length.
+                    countdown <- sprintf "in %s" (DateParser.formatCountdown (DateTime.UtcNow.Add(defaultWindow).ToString("o")))
+            else
+                // No resets_at field at all (e.g. bucket has 0% used and the
+                // server doesn't bother computing a reset). Show the nominal
+                // window length so the user sees something useful.
+                countdown <- sprintf "in %s" (DateParser.formatCountdown (DateTime.UtcNow.Add(defaultWindow).ToString("o")))
             { HasData = true; Used = used; ResetCountdown = countdown }
         else
             empty
@@ -548,8 +509,8 @@ module ClaudeUsageParser =
     /// Picks the more-pressed bucket as primary. On ties the weekly quota wins
     /// (lower per-hour burn rate -> the more informative "watch this one").
     let parse (root: JsonElement) : ParseResult =
-        let session = readBucket root "five_hour"
-        let weekly = readBucket root "seven_day"
+        let session = readBucket root "five_hour" "5h" (TimeSpan.FromHours 5.0)
+        let weekly = readBucket root "seven_day" "7d" (TimeSpan.FromDays 7.0)
 
         let sessionPct = if session.HasData then Math.Round(session.Used, 1) else Double.NaN
         let weeklyPct = if weekly.HasData then Math.Round(weekly.Used, 1) else Double.NaN
@@ -919,16 +880,18 @@ module UsageFetcher =
     }
 
     // 6. Antigravity (Google Cloud Code Assist) - reads OAuth from Windows
-    // Credential Manager and calls v1internal:fetchAvailableModels, the
-    // same endpoint the `agy models` CLI uses. Each model becomes its own
-    // UsageWindow.
+    // Credential Manager and calls v1internal:retrieveUserQuota, the same
+    // endpoint the existing Gemini fetcher uses. The response carries
+    // per-model bucket data with resetTimes, so we can group by
+    // (family, window) and surface 2 bars per family (5h + weekly)
+    // matching the agy CLI's display.
     and private fetchAntigravityUsage () : Task<ProviderUsage> = task {
         let provider = UsageProvider.Antigravity
         let name = ProviderMapping.getDisplayName provider
         try
             let token = AntigravityCredentials.load ()
 
-            use request = new HttpRequestMessage(HttpMethod.Post, "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels")
+            use request = new HttpRequestMessage(HttpMethod.Post, "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota")
             setupHeaders request.Headers
             // The Swift reference uses User-Agent: antigravity for these calls.
             // setupHeaders already set a Chrome User-Agent; replace it (not
