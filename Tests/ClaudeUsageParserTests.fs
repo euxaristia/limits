@@ -103,11 +103,30 @@ let ``Missing utilization field defaults to 0`` () =
     Assert.True(r.PrimaryReset <> "Never Resets")
 
 [<Fact>]
-let ``Empty resets_at string is ignored`` () =
+let ``Empty resets_at string falls back to nominal window length`` () =
     let json = """{ "five_hour": { "utilization": 0.50, "resets_at": "" } }"""
     let r = parseJson json
     Assert.Equal(50.0, r.PrimaryUsed, 1)
-    Assert.Equal("Never Resets", r.PrimaryReset)
+    // The 5-hour window default shows "in 4h Xm" - the exact minute value
+    // depends on test execution time. Match on the "in" prefix.
+    Assert.StartsWith("in ", r.PrimaryReset)
+    Assert.DoesNotContain("Never Resets", r.PrimaryReset)
+
+[<Fact>]
+let ``Missing resets_at field falls back to nominal window length`` () =
+    let json = """{ "five_hour": { "utilization": 0.10 } }"""
+    let r = parseJson json
+    Assert.Equal(10.0, r.PrimaryUsed, 1)
+    Assert.StartsWith("in ", r.PrimaryReset)
+    Assert.DoesNotContain("Never Resets", r.PrimaryReset)
+
+[<Fact>]
+let ``Weekly bucket without resets_at falls back to 7d window`` () =
+    let json = """{ "seven_day": { "utilization": 0.40 } }"""
+    let r = parseJson json
+    Assert.Equal(40.0, r.PrimaryUsed, 1)
+    Assert.StartsWith("in ", r.PrimaryReset)
+    Assert.Contains("d", r.PrimaryReset)
 
 [<Fact>]
 let ``Both buckets present: Session and Weekly fields both populated with raw values`` () =
