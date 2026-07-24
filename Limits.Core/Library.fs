@@ -1145,18 +1145,18 @@ module UsageFetcher =
             return getUnconfiguredData provider
         else
             try
-                use request = new HttpRequestMessage(HttpMethod.Get, "https://cli-chat-proxy.grok.com/v1/user")
-                setupHeaders request.Headers
-                request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", bearerToken.Trim())
+                use userReq = new HttpRequestMessage(HttpMethod.Get, "https://cli-chat-proxy.grok.com/v1/user")
+                setupHeaders userReq.Headers
+                userReq.Headers.UserAgent.Clear()
+                userReq.Headers.UserAgent.ParseAdd("grok/0.2.111")
+                userReq.Headers.Add("x-grok-client-version", "0.2.111")
+                userReq.Headers.Authorization <- AuthenticationHeaderValue("Bearer", bearerToken.Trim())
 
-                let! response = client.SendAsync(request)
-                if response.IsSuccessStatusCode then
-                    let! content = response.Content.ReadAsStringAsync()
-                    use doc = JsonDocument.Parse(content)
-                    let root = doc.RootElement
-                    let mutable hasCodeProp = new JsonElement()
-                    let hasCodeAccess =
-                        root.TryGetProperty("hasGrokCodeAccess", &hasCodeProp) && hasCodeProp.ValueKind = JsonValueKind.True
+                let! userRes = client.SendAsync(userReq)
+                if userRes.IsSuccessStatusCode then
+                    let! userContent = userRes.Content.ReadAsStringAsync()
+                    use userDoc = JsonDocument.Parse(userContent)
+                    let root = userDoc.RootElement
 
                     let email =
                         match tokenOpt with
@@ -1170,13 +1170,55 @@ module UsageFetcher =
                         | Some t when t.ExpiresAt.IsSome -> DateParser.formatCountdown (t.ExpiresAt.Value.ToString("o"))
                         | _ -> "Active"
 
-                    let windows = [("Grok Sub", 0.0, resetCountdown, 0, Some (if hasCodeAccess then "Code Access Active" else "Active"))]
+                    let mutable usedReqPct = 0.0
+                    let mutable usedTokPct = 0.0
+                    let mutable reqText = "0 / 8,300 reqs"
+                    let mutable tokText = "0.00M / 53.00M tokens"
+
+                    try
+                        let pingBody = "{\"model\":\"grok-4.5\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":1}"
+                        use pingReq = new HttpRequestMessage(HttpMethod.Post, "https://cli-chat-proxy.grok.com/v1/chat/completions")
+                        setupHeaders pingReq.Headers
+                        pingReq.Headers.UserAgent.Clear()
+                        pingReq.Headers.UserAgent.ParseAdd("grok/0.2.111")
+                        pingReq.Headers.Add("x-grok-client-version", "0.2.111")
+                        pingReq.Headers.Authorization <- AuthenticationHeaderValue("Bearer", bearerToken.Trim())
+                        pingReq.Content <- new StringContent(pingBody, System.Text.Encoding.UTF8, "application/json")
+
+                        let! pingRes = client.SendAsync(pingReq)
+                        let headers = pingRes.Headers
+
+                        let getHeader (key: string) (defaultVal: float) =
+                            match headers.TryGetValues(key) with
+                            | true, vals ->
+                                let str = Seq.head vals
+                                match Double.TryParse(str) with
+                                | true, v -> v
+                                | _ -> defaultVal
+                            | _ -> defaultVal
+
+                        let limitReq = getHeader "x-ratelimit-limit-requests" 8300.0
+                        let remReq = getHeader "x-ratelimit-remaining-requests" 8300.0
+                        let usedReq = Math.Max(0.0, limitReq - remReq)
+                        usedReqPct <- Math.Clamp((usedReq / limitReq) * 100.0, 0.0, 100.0)
+                        reqText <- sprintf "%.0f / %.0f reqs" usedReq limitReq
+
+                        let limitTok = getHeader "x-ratelimit-limit-tokens" 53000000.0
+                        let remTok = getHeader "x-ratelimit-remaining-tokens" 53000000.0
+                        let usedTok = Math.Max(0.0, limitTok - remTok)
+                        usedTokPct <- Math.Clamp((usedTok / limitTok) * 100.0, 0.0, 100.0)
+                        tokText <- sprintf "%.2fM / %.2fM tokens" (usedTok / 1000000.0) (limitTok / 1000000.0)
+                    with _ -> ()
+
+                    let windows = [
+                        ("Requests", usedReqPct, resetCountdown, 86400, Some reqText)
+                        ("Tokens", usedTokPct, resetCountdown, 86400, Some tokText)
+                    ]
 
                     let footer = sprintf "Grok CLI (%s)" (if String.IsNullOrEmpty email then "Active" else email)
                     return multiWindow provider "grok" name windows "healthy" false false "" footer
                 else
-                    let! errStr = response.Content.ReadAsStringAsync()
-                    let errMsg = sprintf "Grok API status %d" (int response.StatusCode)
+                    let errMsg = sprintf "Grok API status %d" (int userRes.StatusCode)
                     return singleWindow provider "grok" name 0.0 100.0 "N/A" "degraded" false true errMsg ""
             with ex ->
                 return singleWindow provider "grok" name 0.0 100.0 "N/A" "degraded" false true ex.Message ""
