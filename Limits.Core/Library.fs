@@ -471,7 +471,13 @@ module AntigravityUsageParser =
                     RemainingPercent = remainingPct
                     ResetCountdown = first.ResetCountdown
                 } :: result
-            List.rev result
+            let familyRank (label: string) =
+                if label.Equals("Gemini", StringComparison.OrdinalIgnoreCase) then 0
+                elif label.StartsWith("Claude", StringComparison.OrdinalIgnoreCase) then 1
+                else 2
+
+            result
+            |> List.sortBy (fun b -> familyRank b.GroupLabel, b.ResetCountdown)
 
 module ClaudeUsageParser =
     // Claude /usage returns two sibling buckets: a rolling 5-hour session
