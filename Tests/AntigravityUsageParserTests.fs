@@ -170,3 +170,11 @@ let ``Gemini buckets are always ordered before Claude buckets`` () =
     Assert.Equal(2, List.length r)
     Assert.Equal("Gemini", r.[0].GroupLabel)
     Assert.Equal("Claude & GPT", r.[1].GroupLabel)
+
+[<Fact>]
+let ``EmailRedactor redacts email addresses correctly`` () =
+    let redacted = EmailRedactor.redact "Grok CLI (cq4gppc54z@privaterelay.appleid.com)"
+    Assert.Equal("Grok CLI (c***z@privaterelay.appleid.com)", redacted)
+
+    let redactedUser = EmailRedactor.redact "Account: user.name@domain.com"
+    Assert.Equal("Account: u***e@domain.com", redactedUser)
