@@ -53,7 +53,7 @@ module Program =
         printfn "  -p, --provider <id>     Filter status to a single provider (e.g. -p claude)"
         printfn "  --no-color              Disable colored terminal output"
 
-    let renderUsage (u: ProviderUsage) =
+    let renderUsage (maxLabelWidth: int) (u: ProviderUsage) =
         let statusBadge =
             if u.Status = "unconfigured" then Terminal.dim "[UNCONFIGURED]"
             elif u.HasError then Terminal.red "[ERROR]"
@@ -78,7 +78,8 @@ module Program =
                     if String.IsNullOrWhiteSpace(w.ResetCountdown) then ""
                     else sprintf " (%s)" w.ResetCountdown
 
-                printfn "  %-10s %s %s%s" w.Label bar pctText (Terminal.dim resetText)
+                let paddedLabel = w.Label.PadRight(maxLabelWidth)
+                printfn "  %s %s %s%s" paddedLabel bar pctText (Terminal.dim resetText)
 
             if not (String.IsNullOrWhiteSpace(u.Footer)) then
                 printfn "  %s" (Terminal.dim u.Footer)
@@ -127,10 +128,18 @@ module Program =
                     printfn "%s" (Terminal.yellow "No configured providers active.")
                     printfn "Run 'limits providers' to view available providers or set an API key with 'limits config set-key <id> <key>'."
                 else
+                    let maxLabelWidth =
+                        results
+                        |> List.collect (fun u -> u.Windows)
+                        |> List.map (fun w -> w.Label.Length)
+                        |> function
+                            | [] -> 24
+                            | lengths -> List.max lengths |> max 24
+
                     printfn "%s" (Terminal.bold "── AI Limits & Quotas ────────────────────────────────")
                     printfn ""
                     for r in results do
-                        renderUsage r
+                        renderUsage maxLabelWidth r
             return 0
     }
 
