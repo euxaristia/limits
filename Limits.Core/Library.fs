@@ -220,69 +220,88 @@ module AntigravityCredentials =
         AuthMethod: string
     }
 
-    let load () : Token =
-        let mutable credPtr = System.IntPtr.Zero
-        let ok =
-            try Win32.CredRead(TargetName, CredTypeGeneric, 0u, &credPtr)
-            with ex ->
-                raise (AntigravityCredentialsError(sprintf "CredRead Win32 call threw: %s" ex.Message))
-        if not ok then
-            let err = Marshal.GetLastWin32Error()
-            // 1168 = ERROR_NOT_FOUND, 1312 = ERROR_NO_SUCH_LOGON_SESSION. Both mean
-            // "no credential stored" from the caller's perspective.
-            if err = 1168 || err = 1312 then
-                raise (AntigravityCredentialsError("No Antigravity credential found. Sign in via the Antigravity IDE or `agy` CLI."))
-            else
-                raise (AntigravityCredentialsError(sprintf "CredRead failed with Win32 error %d" err))
-        try
-            let cred = Marshal.PtrToStructure(credPtr, typeof<CREDENTIAL>) :?> CREDENTIAL
-            let size = int cred.CredentialBlobSize
-            if size <= 0 || cred.CredentialBlob = System.IntPtr.Zero then
-                raise (AntigravityCredentialsError("Antigravity credential blob is empty"))
-            let bytes : byte[] = Array.zeroCreate size
-            Marshal.Copy(cred.CredentialBlob, bytes, 0, size)
-            let json = System.Text.Encoding.UTF8.GetString(bytes)
-            use doc = JsonDocument.Parse(json)
-            let root = doc.RootElement
-            let mutable tokenProp = new JsonElement()
-            if not (root.TryGetProperty("token", &tokenProp)) || tokenProp.ValueKind <> JsonValueKind.Object then
-                raise (AntigravityCredentialsError("Antigravity credential missing 'token' object"))
-            let mutable accessProp = new JsonElement()
-            if not (tokenProp.TryGetProperty("access_token", &accessProp)) || accessProp.ValueKind <> JsonValueKind.String then
-                raise (AntigravityCredentialsError("Antigravity credential missing 'token.access_token' string"))
-            let accessToken = accessProp.GetString()
-            if String.IsNullOrEmpty(accessToken) then
-                raise (AntigravityCredentialsError("Antigravity credential has empty access_token"))
+    let private parseTokenJson (json: string) : Token =
+        use doc = JsonDocument.Parse(json)
+        let root = doc.RootElement
+        let mutable tokenProp = new JsonElement()
+        if not (root.TryGetProperty("token", &tokenProp)) || tokenProp.ValueKind <> JsonValueKind.Object then
+            raise (AntigravityCredentialsError("Antigravity credential missing 'token' object"))
+        let mutable accessProp = new JsonElement()
+        if not (tokenProp.TryGetProperty("access_token", &accessProp)) || accessProp.ValueKind <> JsonValueKind.String then
+            raise (AntigravityCredentialsError("Antigravity credential missing 'token.access_token' string"))
+        let accessToken = accessProp.GetString()
+        if String.IsNullOrEmpty(accessToken) then
+            raise (AntigravityCredentialsError("Antigravity credential has empty access_token"))
 
-            let refreshToken =
-                let mutable p = new JsonElement()
-                if tokenProp.TryGetProperty("refresh_token", &p) && p.ValueKind = JsonValueKind.String
-                then p.GetString() else ""
+        let refreshToken =
+            let mutable p = new JsonElement()
+            if tokenProp.TryGetProperty("refresh_token", &p) && p.ValueKind = JsonValueKind.String
+            then p.GetString() else ""
 
-            let expiry =
-                let mutable p = new JsonElement()
-                if tokenProp.TryGetProperty("expiry", &p) && p.ValueKind = JsonValueKind.String then
-                    let s = p.GetString()
-                    if not (String.IsNullOrEmpty(s)) then
-                        match DateTime.TryParse(s) with
-                        | true, d -> Some d
-                        | _ -> None
-                    else None
+        let expiry =
+            let mutable p = new JsonElement()
+            if tokenProp.TryGetProperty("expiry", &p) && p.ValueKind = JsonValueKind.String then
+                let s = p.GetString()
+                if not (String.IsNullOrEmpty(s)) then
+                    match DateTime.TryParse(s) with
+                    | true, d -> Some d
+                    | _ -> None
                 else None
+            else None
 
-            let authMethod =
-                let mutable p = new JsonElement()
-                if root.TryGetProperty("auth_method", &p) && p.ValueKind = JsonValueKind.String
-                then p.GetString() else "unknown"
+        let authMethod =
+            let mutable p = new JsonElement()
+            if root.TryGetProperty("auth_method", &p) && p.ValueKind = JsonValueKind.String
+            then p.GetString() else "unknown"
 
-            {
-                AccessToken = accessToken
-                RefreshToken = refreshToken
-                Expiry = expiry
-                AuthMethod = authMethod
-            }
-        finally
-            Win32.CredFree(credPtr)
+        {
+            AccessToken = accessToken
+            RefreshToken = refreshToken
+            Expiry = expiry
+            AuthMethod = authMethod
+        }
+
+    let load () : Token =
+        if OperatingSystem.IsWindows() then
+            let mutable credPtr = System.IntPtr.Zero
+            let ok =
+                try Win32.CredRead(TargetName, CredTypeGeneric, 0u, &credPtr)
+                with ex ->
+                    raise (AntigravityCredentialsError(sprintf "CredRead Win32 call threw: %s" ex.Message))
+            if not ok then
+                let err = Marshal.GetLastWin32Error()
+                if err = 1168 || err = 1312 then
+                    raise (AntigravityCredentialsError("No Antigravity credential found. Sign in via the Antigravity IDE or `agy` CLI."))
+                else
+                    raise (AntigravityCredentialsError(sprintf "CredRead failed with Win32 error %d" err))
+            try
+                let cred = Marshal.PtrToStructure(credPtr, typeof<CREDENTIAL>) :?> CREDENTIAL
+                let size = int cred.CredentialBlobSize
+                if size <= 0 || cred.CredentialBlob = System.IntPtr.Zero then
+                    raise (AntigravityCredentialsError("Antigravity credential blob is empty"))
+                let bytes : byte[] = Array.zeroCreate size
+                Marshal.Copy(cred.CredentialBlob, bytes, 0, size)
+                let json = System.Text.Encoding.UTF8.GetString(bytes)
+                parseTokenJson json
+            finally
+                if credPtr <> System.IntPtr.Zero then
+                    Win32.CredFree(credPtr)
+        else
+            let home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            let paths = [
+                Path.Combine(home, ".gemini", "antigravity-cli", "credentials.json")
+                Path.Combine(home, ".config", "antigravity", "credentials.json")
+                Path.Combine(home, ".config", "agy", "credentials.json")
+            ]
+            match List.tryFind File.Exists paths with
+            | Some path ->
+                try
+                    let json = File.ReadAllText(path)
+                    parseTokenJson json
+                with ex ->
+                    raise (AntigravityCredentialsError(sprintf "Failed to parse Antigravity credential file at %s: %s" path ex.Message))
+            | None ->
+                raise (AntigravityCredentialsError("No Antigravity credential found on macOS/Linux. Sign in via `agy` CLI."))
 
 module DateParser =
     let formatCountdown (resetsAtStr: string) =
