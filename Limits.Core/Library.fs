@@ -1133,6 +1133,50 @@ module UsageFetcher =
                 0.0 100.0 "N/A" "degraded" false true ex.Message ""
     }
 
+    let private fetchGrokWebUsage (cookieHeader: string) : Task<ProviderUsage option> = task {
+        let provider = UsageProvider.Grok
+        let name = ProviderMapping.getDisplayName provider
+        try
+            use req = new HttpRequestMessage(HttpMethod.Post, "https://grok.com/rest/rate-limits")
+            setupHeaders req.Headers
+            let formattedCookie =
+                if cookieHeader.Contains("sso=") then cookieHeader.Trim()
+                else sprintf "sso=%s" (cookieHeader.Trim())
+            req.Headers.Add("Cookie", formattedCookie)
+            req.Content <- new StringContent("{\"requestKind\":\"GROK_BUILD\"}", System.Text.Encoding.UTF8, "application/json")
+
+            let! res = client.SendAsync(req)
+            if res.IsSuccessStatusCode then
+                let! body = res.Content.ReadAsStringAsync()
+                use doc = JsonDocument.Parse(body)
+                let root = doc.RootElement
+
+                let mutable remQueries = 0.0
+                let mutable totalQueries = 100.0
+                let mutable resetsAt = "Active"
+
+                let mutable p = new JsonElement()
+                if root.TryGetProperty("remainingQueries", &p) && p.ValueKind = JsonValueKind.Number then
+                    remQueries <- p.GetDouble()
+                if root.TryGetProperty("totalQueries", &p) && p.ValueKind = JsonValueKind.Number then
+                    totalQueries <- p.GetDouble()
+                if root.TryGetProperty("rateLimitResetTime", &p) && p.ValueKind = JsonValueKind.String then
+                    resetsAt <- DateParser.formatCountdown (p.GetString())
+
+                let used = Math.Max(0.0, totalQueries - remQueries)
+                let usedPct = Math.Clamp((used / totalQueries) * 100.0, 0.0, 100.0)
+                let details = sprintf "%.0f%% used (%.0f / %.0f)" usedPct used totalQueries
+
+                let windows = [
+                    ("Weekly SuperGrok", usedPct, resetsAt, 7 * 24 * 3600, Some details)
+                ]
+                return Some (multiWindow provider "grok" name windows "healthy" false false "" "grok.com Web Session")
+            else
+                return None
+        with _ ->
+            return None
+    }
+
     let private fetchGrokUsage (tokenOpt: GrokCredentials.Token option) (apiKey: string) : Task<ProviderUsage> = task {
         let provider = UsageProvider.Grok
         let name = ProviderMapping.getDisplayName provider
@@ -1272,8 +1316,16 @@ module UsageFetcher =
         | UsageProvider.Antigravity ->
             return! fetchAntigravityUsage ()
         | UsageProvider.Grok ->
-            let grokToken = GrokCredentials.load()
-            return! fetchGrokUsage grokToken config.apiKey
+            if hasCookie then
+                let! webRes = fetchGrokWebUsage config.cookieHeader
+                match webRes with
+                | Some usage -> return usage
+                | None ->
+                    let grokToken = GrokCredentials.load()
+                    return! fetchGrokUsage grokToken config.apiKey
+            else
+                let grokToken = GrokCredentials.load()
+                return! fetchGrokUsage grokToken config.apiKey
         | _ ->
             return getUnconfiguredData provider
     }
