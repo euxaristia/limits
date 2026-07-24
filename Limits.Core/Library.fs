@@ -1210,16 +1210,10 @@ module UsageFetcher =
                         tokText <- sprintf "%.2fM / %.2fM tokens" (usedTok / 1000000.0) (limitTok / 1000000.0)
                     with _ -> ()
 
-                    let windows =
-                        if usedTokPct > usedReqPct + 10.0 then
-                            [
-                                ("Weekly", usedReqPct, resetCountdown, 7 * 24 * 3600, Some reqText)
-                                ("Weekly Tokens", usedTokPct, resetCountdown, 7 * 24 * 3600, Some tokText)
-                            ]
-                        else
-                            [
-                                ("Weekly", usedReqPct, resetCountdown, 7 * 24 * 3600, Some reqText)
-                            ]
+                    let windows = [
+                        ("Weekly (Reqs)", usedReqPct, resetCountdown, 7 * 24 * 3600, Some reqText)
+                        ("Weekly (Tokens)", usedTokPct, resetCountdown, 7 * 24 * 3600, Some tokText)
+                    ]
 
                     let footer = sprintf "Grok CLI (%s)" (if String.IsNullOrEmpty email then "Active" else email)
                     return multiWindow provider "grok" name windows "healthy" false false "" footer
