@@ -158,3 +158,15 @@ let ``Real Antigravity response shape parses into 2 Gemini + 2 Claude/GPT bucket
     Assert.Equal(3, cgpt.Members.Split(',').Length)
     Assert.True(gem.RemainingPercent > 90.0, "Gemini 5h should be >90% remaining")
     Assert.Equal(0.0, cgpt.RemainingPercent)
+
+[<Fact>]
+let ``Gemini buckets are always ordered before Claude buckets`` () =
+    let reset = DateTime.UtcNow.AddHours(4.0).ToString("o")
+    let claude = sprintf """{ "modelId": "claude-opus-4-6", "remainingFraction": 0.5, "resetTime": "%s" }""" reset
+    let gemini = sprintf """{ "modelId": "gemini-3-1-pro", "remainingFraction": 0.8, "resetTime": "%s" }""" reset
+    // Claude is placed FIRST in payload
+    let json = "{ \"buckets\": [ " + claude + ", " + gemini + " ] }"
+    let r = parseJson json
+    Assert.Equal(2, List.length r)
+    Assert.Equal("Gemini", r.[0].GroupLabel)
+    Assert.Equal("Claude & GPT", r.[1].GroupLabel)
