@@ -637,6 +637,24 @@ module ClaudeUsageParser =
             Weekly = if weekly.HasData then Some weekly else None
         }
 
+module EmailRedactor =
+    open System.Text.RegularExpressions
+
+    let redact (input: string) : string =
+        if String.IsNullOrWhiteSpace(input) then ""
+        else
+            let pattern = @"\b([a-zA-Z0-9._%+-]+)@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b"
+            Regex.Replace(input, pattern, fun (m: Match) ->
+                let local = m.Groups.[1].Value
+                let domain = m.Groups.[2].Value
+                let redactedLocal =
+                    if local.Length <= 2 then
+                        sprintf "%c***" local.[0]
+                    else
+                        sprintf "%c***%c" local.[0] local.[local.Length - 1]
+                sprintf "%s@%s" redactedLocal domain
+            )
+
 module UsageFetcher =
     let private client = new HttpClient()
 
@@ -678,8 +696,8 @@ module UsageFetcher =
             Status = status
             IsMock = isMock
             HasError = hasError
-            ErrorMessage = errorMessage
-            Footer = footer
+            ErrorMessage = EmailRedactor.redact errorMessage
+            Footer = EmailRedactor.redact footer
         }
 
     /// Build a multi-window ProviderUsage record from raw percentage values.
@@ -706,12 +724,12 @@ module UsageFetcher =
                       UsedPercent = Math.Clamp(pct, 0.0, 100.0)
                       ResetCountdown = reset
                       WindowSeconds = secs
-                      PercentTextOverride = pctOverride })
+                      PercentTextOverride = pctOverride |> Option.map EmailRedactor.redact })
             Status = status
             IsMock = isMock
             HasError = hasError
-            ErrorMessage = errorMessage
-            Footer = footer
+            ErrorMessage = EmailRedactor.redact errorMessage
+            Footer = EmailRedactor.redact footer
         }
 
     // 1. OpenAI Credit Grants API
