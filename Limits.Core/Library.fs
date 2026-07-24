@@ -441,6 +441,8 @@ module AntigravityUsageParser =
         /// 0..100, what the CLI shows on the bar (remainingFraction * 100).
         RemainingPercent: float
         ResetCountdown: string
+        /// Timeframe label derived from resetTime duration: "Session", "Weekly", "Daily", "Quota".
+        Timeframe: string
     }
 
     let empty = {
@@ -449,6 +451,7 @@ module AntigravityUsageParser =
         UsedPercent = 0.0
         RemainingPercent = 0.0
         ResetCountdown = "Never Resets"
+        Timeframe = "Quota"
     }
 
     let private familyFromModelId (modelId: string) : string =
@@ -459,12 +462,28 @@ module AntigravityUsageParser =
         elif m.StartsWith("chat_") || m.StartsWith("tab_") then "Internal"
         else "Antigravity"
 
+    let private deriveTimeframe (rawIso: string) (countdown: string) : string =
+        if String.IsNullOrEmpty rawIso then "Quota"
+        else
+            match DateTime.TryParse rawIso with
+            | true, date ->
+                let diff = date.ToUniversalTime() - DateTime.UtcNow
+                if diff.TotalHours <= 8.0 then "Session"
+                elif diff.TotalHours <= 36.0 then "Daily"
+                elif diff.TotalHours <= 200.0 then "Weekly"
+                else "Quota"
+            | _ ->
+                if countdown.EndsWith("h") || (countdown.Contains("h ") && not (countdown.Contains("d"))) then "Session"
+                elif countdown.Contains("d") then "Weekly"
+                else "Quota"
+
     /// A single raw bucket entry from retrieveUserQuota.
     type private RawBucket = {
         ModelId: string
         Family: string
         RemainingFraction: float
         ResetCountdown: string
+        Timeframe: string
     }
 
     let private parseBucket (parent: JsonElement) : RawBucket option =
@@ -485,22 +504,26 @@ module AntigravityUsageParser =
                     then remProp.GetDouble()
                     else 0.0
                 let mutable resetProp = new JsonElement()
-                let reset =
+                let resetRaw =
                     if parent.TryGetProperty("resetTime", &resetProp) && resetProp.ValueKind = JsonValueKind.String
-                    then
-                        let s = resetProp.GetString()
-                        if not (String.IsNullOrEmpty(s)) then DateParser.formatCountdown s else "Never Resets"
+                    then resetProp.GetString()
+                    else ""
+                let reset =
+                    if not (String.IsNullOrEmpty resetRaw)
+                    then DateParser.formatCountdown resetRaw
                     else "Never Resets"
+                let timeframe = deriveTimeframe resetRaw reset
                 Some {
                     ModelId = modelId
                     Family = familyFromModelId modelId
                     RemainingFraction = remaining
                     ResetCountdown = reset
+                    Timeframe = timeframe
                 }
 
     /// Parses the full retrieveUserQuota response into a list of grouped
     /// buckets. Drops placeholder models and entries with no modelId.
-    /// Groups by (family, resetTime) - the API's resetTime field is the
+    /// Groups by (family, timeframe, resetTime) - the API's resetTime field is the
     /// authoritative window length (5h vs weekly).
     let parse (root: JsonElement) : Bucket list =
         let mutable bucketsProp = new JsonElement()
@@ -511,10 +534,10 @@ module AntigravityUsageParser =
                 bucketsProp.EnumerateArray()
                 |> Seq.choose parseBucket
                 |> Seq.toList
-            // Group by (family, resetCountdown)
+            // Group by (family, timeframe, resetCountdown)
             let groups = System.Collections.Generic.Dictionary<string, RawBucket list>()
             for entry in raws do
-                let k = entry.Family + "|" + entry.ResetCountdown
+                let k = entry.Family + "|" + entry.Timeframe + "|" + entry.ResetCountdown
                 if groups.ContainsKey k then
                     let mutable existing : RawBucket list = Unchecked.defaultof<_>
                     if groups.TryGetValue(k, &existing) then
@@ -526,11 +549,6 @@ module AntigravityUsageParser =
             for kv in groups do
                 let entries = kv.Value
                 let first = List.head entries
-                // Group's remainingFraction = the MIN of all members'
-                // remainingFraction (most-pressed), since they share the
-                // quota. The API's `retrieveUserQuota` returns the same
-                // remainingFraction across all members of a window because
-                // they share it, so min/max/avg are equivalent.
                 let remaining =
                     entries
                     |> List.map (fun e -> e.RemainingFraction)
@@ -549,6 +567,7 @@ module AntigravityUsageParser =
                     UsedPercent = used
                     RemainingPercent = remainingPct
                     ResetCountdown = first.ResetCountdown
+                    Timeframe = first.Timeframe
                 } :: result
             let familyRank (label: string) =
                 if label.Equals("Gemini", StringComparison.OrdinalIgnoreCase) then 0
@@ -1057,8 +1076,10 @@ module UsageFetcher =
                     let windows =
                         buckets
                         |> List.map (fun b ->
+                            let tf = if String.IsNullOrWhiteSpace b.Timeframe || b.Timeframe = "Quota" then "" else sprintf "%s " b.Timeframe
                             let label =
-                                sprintf "%s (%d model%s)"
+                                sprintf "%s%s (%d model%s)"
+                                    tf
                                     b.GroupLabel
                                     (b.Members.Split ',').Length
                                     (if (b.Members.Split ',').Length = 1 then "" else "s")
