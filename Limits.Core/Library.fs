@@ -1058,7 +1058,7 @@ module UsageFetcher =
                         buckets
                         |> List.map (fun b ->
                             let label =
-                                sprintf "%s \u2022 %d model%s"
+                                sprintf "%s (%d model%s)"
                                     b.GroupLabel
                                     (b.Members.Split ',').Length
                                     (if (b.Members.Split ',').Length = 1 then "" else "s")
