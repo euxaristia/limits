@@ -1,14 +1,14 @@
-# CodexBarWin 🎚️
+# Limits 🎚️
 
 Every AI coding limit, right in your Windows System Tray.
 
-A native Windows App SDK / WinUI 3 port of CodexBar, utilizing an F# Core library for configuration handling and API operations.
+A native Windows App SDK / WinUI 3 application utilizing an F# Core library for configuration handling and API operations.
 
 ## Features
 
 - **Native System Tray Integration**: Lives quietly in your Notification Area via `H.NotifyIcon`.
 - **Flyout Dashboard**: Clean, borderless popover window utilizing Windows 11 `MicaBackdrop` that positions itself perfectly above the taskbar.
-- **Shared Config**: Reads and writes to the exact same JSON format (`~/.config/codexbar/config.json`), making it compatible with legacy macOS and CLI configuration profiles.
+- **Shared Config**: Reads and writes configuration (`~/.config/limits/config.json` with fallback to `~/.config/codexbar/config.json`), keeping compatibility with legacy CLI configuration profiles.
 - **Vibrant Gradients**: Horizontal progress bars showing usage with custom gradient colors per provider (OpenAI, Claude, Gemini, DeepSeek, Cursor).
 - **Settings Panel**: Slide-in UI to toggle active providers and configure API keys directly inside the app.
 - **Auto-Hide**: Hides to the system tray on window deactivation (clicking away) or closing, and opens on a single click of the tray icon.
@@ -17,8 +17,8 @@ A native Windows App SDK / WinUI 3 port of CodexBar, utilizing an F# Core librar
 
 This is a mixed-language .NET 11 solution leveraging the strengths of both F# and C#:
 
-- **`CodexBarWin.Core` (F# Library)**: Handles domain models, JSON deserialization of config files, environment-variable overrides, and API/mock usage fetch engines.
-- **`CodexBarWin` (C# WinUI 3 App)**: Coordinates the Windows App SDK window lifecycle, Win32 handle positioning, programmatic tray icons, and XAML bindings.
+- **`Limits.Core` (F# Library)**: Handles domain models, JSON deserialization of config files, environment-variable overrides, and API/mock usage fetch engines.
+- **`Limits` (C# WinUI 3 App)**: Coordinates the Windows App SDK window lifecycle, Win32 handle positioning, programmatic tray icons, and XAML bindings.
 
 ## Requirements
 
@@ -28,13 +28,13 @@ This is a mixed-language .NET 11 solution leveraging the strengths of both F# an
 ## Build
 
 ```powershell
-dotnet build CodexBarWin.csproj
+dotnet build Limits.csproj
 ```
 
 ## Run
 
 ```powershell
-dotnet run --project CodexBarWin.csproj
+dotnet run --project Limits.csproj
 ```
 
 ## Technical Notes

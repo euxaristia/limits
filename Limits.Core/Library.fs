@@ -1,4 +1,4 @@
-namespace CodexBarWin.Core
+namespace Limits.Core
 
 open System
 open System.IO
@@ -73,10 +73,12 @@ type ProviderConfig = {
     [<JsonPropertyName("region")>] region: string
 }
 
-type CodexBarConfig = {
+type LimitsConfig = {
     [<JsonPropertyName("version")>] version: int
     [<JsonPropertyName("providers")>] providers: ProviderConfig list
 }
+
+type CodexBarConfig = LimitsConfig
 
 type UsageWindow = {
     /// Short label shown next to the progress bar (e.g. "Session", "Weekly", "Quota").
@@ -116,20 +118,29 @@ type ProviderUsage = {
 
 module ConfigStore =
     let getDefaultConfigPath () =
-        let envOverride = Environment.GetEnvironmentVariable("CODEXBAR_CONFIG")
+        let envOverride = Environment.GetEnvironmentVariable("LIMITS_CONFIG")
         if not (String.IsNullOrWhiteSpace(envOverride)) then
             envOverride
         else
-            let xdgConfig = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME")
-            let home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
-            let basePath =
-                if not (String.IsNullOrWhiteSpace(xdgConfig)) then
-                    xdgConfig
+            let legacyOverride = Environment.GetEnvironmentVariable("CODEXBAR_CONFIG")
+            if not (String.IsNullOrWhiteSpace(legacyOverride)) then
+                legacyOverride
+            else
+                let xdgConfig = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME")
+                let home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+                let basePath =
+                    if not (String.IsNullOrWhiteSpace(xdgConfig)) then
+                        xdgConfig
+                    else
+                        Path.Combine(home, ".config")
+                let limitsPath = Path.Combine(basePath, "limits", "config.json")
+                if File.Exists(limitsPath) then
+                    limitsPath
                 else
-                    Path.Combine(home, ".config")
-            Path.Combine(basePath, "codexbar", "config.json")
+                    let codexbarPath = Path.Combine(basePath, "codexbar", "config.json")
+                    if File.Exists(codexbarPath) then codexbarPath else limitsPath
 
-    let createDefaultConfig () : CodexBarConfig =
+    let createDefaultConfig () : LimitsConfig =
         let defaultProviders = [
             { id = "codex"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
             { id = "openai"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
@@ -143,13 +154,13 @@ module ConfigStore =
         ]
         { version = 1; providers = defaultProviders }
 
-    let load () : CodexBarConfig =
+    let load () : LimitsConfig =
         let path = getDefaultConfigPath()
         try
             if File.Exists(path) then
                 let json = File.ReadAllText(path)
                 let options = JsonSerializerOptions(PropertyNameCaseInsensitive = true)
-                JsonSerializer.Deserialize<CodexBarConfig>(json, options)
+                JsonSerializer.Deserialize<LimitsConfig>(json, options)
             else
                 let defaultConfig = createDefaultConfig()
                 let dir = Path.GetDirectoryName(path)
@@ -161,7 +172,7 @@ module ConfigStore =
         with _ ->
             createDefaultConfig()
 
-    let save (config: CodexBarConfig) =
+    let save (config: LimitsConfig) =
         let path = getDefaultConfigPath()
         try
             let dir = Path.GetDirectoryName(path)

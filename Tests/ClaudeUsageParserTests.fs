@@ -1,9 +1,9 @@
-module CodexBarWin.Core.Tests.ClaudeUsageParserTests
+module Limits.Core.Tests.ClaudeUsageParserTests
 
 open System
 open System.Text.Json
 open Xunit
-open CodexBarWin.Core
+open Limits.Core
 
 let private parseJson (s: string) =
     use doc = JsonDocument.Parse(s)

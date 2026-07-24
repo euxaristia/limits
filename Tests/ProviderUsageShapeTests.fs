@@ -1,7 +1,7 @@
-module CodexBarWin.Core.Tests.ProviderUsageShapeTests
+module Limits.Core.Tests.ProviderUsageShapeTests
 
 open Xunit
-open CodexBarWin.Core
+open Limits.Core
 
 /// Asserts the ProviderUsage / UsageWindow data model contract.
 /// Most of the runtime fetchers are HttpClient wrappers we cannot exercise
