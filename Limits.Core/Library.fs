@@ -1177,6 +1177,42 @@ module UsageFetcher =
             return None
     }
 
+    let private tryReadGrokLogUsage () : (float * string) option =
+        try
+            let userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            let logPath = Path.Combine(userProfile, ".grok", "logs", "unified.jsonl")
+            if File.Exists(logPath) then
+                use fs = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+                use reader = new StreamReader(fs)
+                let lines = ResizeArray<string>()
+                while not reader.EndOfStream do
+                    let line = reader.ReadLine()
+                    if not (String.IsNullOrEmpty(line)) && line.Contains("billing: fetched credits config") then
+                        lines.Add(line)
+                if lines.Count > 0 then
+                    let lastLine = lines.[lines.Count - 1]
+                    use doc = JsonDocument.Parse(lastLine)
+                    let root = doc.RootElement
+                    let mutable ctxProp = new JsonElement()
+                    let mutable cfgProp = new JsonElement()
+                    let mutable pctProp = new JsonElement()
+                    if root.TryGetProperty("ctx", &ctxProp) && ctxProp.TryGetProperty("config", &cfgProp) then
+                        let mutable pct = 0.0
+                        if cfgProp.TryGetProperty("creditUsagePercent", &pctProp) && pctProp.ValueKind = JsonValueKind.Number then
+                            pct <- pctProp.GetDouble()
+
+                        let mutable resetCountdown = "Active"
+                        let mutable periodProp = new JsonElement()
+                        let mutable endProp = new JsonElement()
+                        if cfgProp.TryGetProperty("currentPeriod", &periodProp) && periodProp.TryGetProperty("end", &endProp) && endProp.ValueKind = JsonValueKind.String then
+                            resetCountdown <- DateParser.formatCountdown (endProp.GetString())
+
+                        Some (pct, resetCountdown)
+                    else None
+                else None
+            else None
+        with _ -> None
+
     let private fetchGrokUsage (tokenOpt: GrokCredentials.Token option) (apiKey: string) : Task<ProviderUsage> = task {
         let provider = UsageProvider.Grok
         let name = ProviderMapping.getDisplayName provider
@@ -1214,15 +1250,26 @@ module UsageFetcher =
                         | Some t when t.ExpiresAt.IsSome -> DateParser.formatCountdown (t.ExpiresAt.Value.ToString("o"))
                         | _ -> "Active"
 
+                    let logUsageOpt = tryReadGrokLogUsage()
+                    match logUsageOpt with
+                    | Some (logPct, logReset) ->
+                        let details = sprintf "%.0f%% used" logPct
+                        let windows = [
+                            ("Weekly", logPct, logReset, 7 * 24 * 3600, Some details)
+                        ]
+                        let footer = sprintf "Grok CLI (%s)" (if String.IsNullOrEmpty email then "Active" else email)
+                        return multiWindow provider "grok" name windows "healthy" false false "" footer
+                    | None ->
+
                     let mutable usedReqPct = 0.0
                     let mutable usedTokPct = 0.0
                     let mutable usedReq = 0.0
-                    let mutable limitReq = 8300.0
+                    let mutable limitReq = 216.0
                     let mutable usedTok = 0.0
-                    let mutable limitTok = 53000000.0
+                    let mutable limitTok = 9000000.0
 
                     try
-                        let pingBody = "{\"model\":\"grok-4.5\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":1}"
+                        let pingBody = "{\"model\":\"grok-build\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":1}"
                         use pingReq = new HttpRequestMessage(HttpMethod.Post, "https://cli-chat-proxy.grok.com/v1/chat/completions")
                         setupHeaders pingReq.Headers
                         pingReq.Headers.UserAgent.Clear()
@@ -1243,13 +1290,13 @@ module UsageFetcher =
                                 | _ -> defaultVal
                             | _ -> defaultVal
 
-                        limitReq <- getHeader "x-ratelimit-limit-requests" 8300.0
-                        let remReq = getHeader "x-ratelimit-remaining-requests" 8300.0
+                        limitReq <- getHeader "x-ratelimit-limit-requests" 216.0
+                        let remReq = getHeader "x-ratelimit-remaining-requests" 216.0
                         usedReq <- Math.Max(0.0, limitReq - remReq)
                         usedReqPct <- Math.Clamp((usedReq / limitReq) * 100.0, 0.0, 100.0)
 
-                        limitTok <- getHeader "x-ratelimit-limit-tokens" 53000000.0
-                        let remTok = getHeader "x-ratelimit-remaining-tokens" 53000000.0
+                        limitTok <- getHeader "x-ratelimit-limit-tokens" 9000000.0
+                        let remTok = getHeader "x-ratelimit-remaining-tokens" 9000000.0
                         usedTok <- Math.Max(0.0, limitTok - remTok)
                         usedTokPct <- Math.Clamp((usedTok / limitTok) * 100.0, 0.0, 100.0)
                     with _ -> ()
