@@ -1074,7 +1074,8 @@ module UsageFetcher =
                             (label, b.UsedPercent, b.ResetCountdown, 0, Some remainingText))
                     let modelCount = buckets |> List.sumBy (fun b -> (b.Members.Split ',').Length)
                     let accountLabel =
-                        if not (String.IsNullOrEmpty token.Email) then token.Email
+                        if not (String.IsNullOrEmpty token.Email) then
+                            sprintf "%s, %s" token.Email token.AuthMethod
                         else token.AuthMethod
                     let footer =
                         sprintf "Antigravity (%s) - %d group%s, %d model%s"
