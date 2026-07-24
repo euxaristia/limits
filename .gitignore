@@ -23,6 +23,7 @@ artifacts/
 *.coveragexml
 
 # NuGet
+nupkg/
 *.nupkg
 *.snupkg
 *.nuget.props
