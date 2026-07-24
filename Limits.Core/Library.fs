@@ -907,8 +907,8 @@ module UsageFetcher =
                         0.0 100.0 "N/A" "degraded" false true
                         "Credentials file missing access_token" ""
             else
-                // No credentials file found - generate mock telemetry
-                return getMockData provider
+                // No credentials file found
+                return getUnconfiguredData provider
         with ex ->
             return singleWindow
                 provider "gemini" name
@@ -1007,57 +1007,33 @@ module UsageFetcher =
                 0.0 100.0 "N/A" "degraded" false true ex.Message ""
     }
 
-    // Generates high-fidelity mock data if api key is missing
-    and getMockData (provider: UsageProvider) : ProviderUsage =
+    /// Returns an unconfigured ProviderUsage record when credentials or API keys are missing.
+    and getUnconfiguredData (provider: UsageProvider) : ProviderUsage =
         let name = ProviderMapping.getDisplayName provider
         let id = ProviderMapping.toString provider
-        match provider with
-        | UsageProvider.Codex ->
-            singleWindow provider id name
-                142.0 500.0 "1h 42m" "healthy" true false ""
-                "Plan: Pro"
-        | UsageProvider.OpenAI ->
-            singleWindow provider id name
-                4.82 18.0 "Resets in 2d" "healthy" true false ""
-                "Spent: $4.82 of $18.00"
-        | UsageProvider.Claude ->
-            // Mock Claude: surface a Session + Weekly split so the multi-window
-            // UI has something realistic to render for unmocked-Claude users.
-            multiWindow provider id name
-                [("Session", 56.0, "4h 12m", 5 * 3600, None);
-                 ("Weekly", 28.0, "5d 6h", 7 * 24 * 3600, None)]
-                "healthy" true false "" "Plan: Claude Pro"
-        | UsageProvider.Cursor ->
-            singleWindow provider id name
-                384.0 500.0 "Resets July 5" "healthy" true false ""
-                "384 / 500 fast requests"
-        | UsageProvider.Gemini ->
-            singleWindow provider id name
-                60.0 100.0 "Daily Quota" "healthy" true false ""
-                "RPM: 15 / 360"
-        | UsageProvider.DeepSeek ->
-            singleWindow provider id name
-                2.15 15.0 "Never Resets" "healthy" true false ""
-                "Balance: $12.85 available"
-        | UsageProvider.OpenRouter ->
-            singleWindow provider id name
-                0.85 5.0 "Monthly Reset" "healthy" true false ""
-                "Spent: $0.85"
-        | UsageProvider.ElevenLabs ->
-            singleWindow provider id name
-                42500.0 100000.0 "Resets in 12d" "healthy" true false ""
-                "42,500 characters used"
-        | UsageProvider.Groq ->
-            singleWindow provider id name
-                65.0 100.0 "Minute Limit" "healthy" true false ""
-                "65 / 100 requests"
-        | UsageProvider.Bedrock ->
-            singleWindow provider id name
-                12.45 50.0 "Billing Cycle" "healthy" true false ""
-                "Cost this month: $12.45"
-        | _ ->
-            singleWindow provider id name
-                0.0 100.0 "Unknown" "unknown" true false "" ""
+        let msg =
+            match provider with
+            | UsageProvider.OpenAI -> "API key required. Set with 'limits config set-key openai <key>'"
+            | UsageProvider.Claude -> "API key or Claude CLI login required (~/.claude/.credentials.json)"
+            | UsageProvider.DeepSeek -> "API key required. Set with 'limits config set-key deepseek <key>'"
+            | UsageProvider.OpenRouter -> "API key required. Set with 'limits config set-key openrouter <key>'"
+            | UsageProvider.ElevenLabs -> "API key required. Set with 'limits config set-key elevenlabs <key>'"
+            | UsageProvider.Groq -> "API key required. Set with 'limits config set-key groq <key>'"
+            | UsageProvider.Bedrock -> "AWS credentials required"
+            | UsageProvider.Cursor -> "API key or token required"
+            | UsageProvider.Codex -> "API key or token required"
+            | _ -> "Credentials or API key required"
+        {
+            Provider = provider
+            Id = id
+            DisplayName = name
+            Windows = []
+            Status = "unconfigured"
+            IsMock = false
+            HasError = true
+            ErrorMessage = msg
+            Footer = ""
+        }
 
     // 2b. Claude OAuth API (from local Claude CLI credentials)
     let private fetchClaudeOAuthUsage (accessToken: string) : Task<ProviderUsage> = task {
@@ -1131,13 +1107,13 @@ module UsageFetcher =
                             if not (String.IsNullOrWhiteSpace(token)) then
                                 return! fetchClaudeOAuthUsage token
                             else
-                                return getMockData provider
+                                return getUnconfiguredData provider
                         else
-                            return getMockData provider
+                            return getUnconfiguredData provider
                     with _ ->
-                        return getMockData provider
+                        return getUnconfiguredData provider
                 else
-                    return getMockData provider
+                    return getUnconfiguredData provider
         | UsageProvider.DeepSeek when hasApiKey ->
             return! fetchDeepSeekBalance config.apiKey
         | UsageProvider.OpenRouter when hasApiKey ->
@@ -1147,5 +1123,5 @@ module UsageFetcher =
         | UsageProvider.Antigravity ->
             return! fetchAntigravityUsage ()
         | _ ->
-            return getMockData provider
+            return getUnconfiguredData provider
     }
