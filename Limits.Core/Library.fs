@@ -230,6 +230,7 @@ module AntigravityCredentials =
         RefreshToken: string
         Expiry: DateTime option
         AuthMethod: string
+        Email: string
     }
 
     let private parseTokenJson (json: string) : Token =
@@ -266,11 +267,33 @@ module AntigravityCredentials =
             if root.TryGetProperty("auth_method", &p) && p.ValueKind = JsonValueKind.String
             then p.GetString() else "unknown"
 
+        let email =
+            try
+                let mutable idTokenProp = new JsonElement()
+                if root.TryGetProperty("id_token", &idTokenProp) && idTokenProp.ValueKind = JsonValueKind.String then
+                    let idToken = idTokenProp.GetString()
+                    let parts = idToken.Split('.')
+                    if parts.Length >= 2 then
+                        let payloadBase64 = parts.[1].Replace('-', '+').Replace('_', '/')
+                        let mod4 = payloadBase64.Length % 4
+                        let padded = if mod4 > 0 then payloadBase64 + String('=', 4 - mod4) else payloadBase64
+                        let bytes = Convert.FromBase64String(padded)
+                        let payloadJson = System.Text.Encoding.UTF8.GetString(bytes)
+                        use payloadDoc = JsonDocument.Parse(payloadJson)
+                        let mutable emailProp = new JsonElement()
+                        if payloadDoc.RootElement.TryGetProperty("email", &emailProp) && emailProp.ValueKind = JsonValueKind.String then
+                            emailProp.GetString()
+                        else ""
+                    else ""
+                else ""
+            with _ -> ""
+
         {
             AccessToken = accessToken
             RefreshToken = refreshToken
             Expiry = expiry
             AuthMethod = authMethod
+            Email = email
         }
 
     let load () : Token =
@@ -1050,9 +1073,12 @@ module UsageFetcher =
                                 else sprintf "%d%% remaining" (int (b.RemainingPercent + 0.5))
                             (label, b.UsedPercent, b.ResetCountdown, 0, Some remainingText))
                     let modelCount = buckets |> List.sumBy (fun b -> (b.Members.Split ',').Length)
+                    let accountLabel =
+                        if not (String.IsNullOrEmpty token.Email) then token.Email
+                        else token.AuthMethod
                     let footer =
                         sprintf "Antigravity (%s) - %d group%s, %d model%s"
-                            token.AuthMethod
+                            accountLabel
                             (List.length buckets)
                             (if List.length buckets = 1 then "" else "s")
                             modelCount
