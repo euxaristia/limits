@@ -1172,8 +1172,10 @@ module UsageFetcher =
 
                     let mutable usedReqPct = 0.0
                     let mutable usedTokPct = 0.0
-                    let mutable reqText = "0 / 8,300 reqs"
-                    let mutable tokText = "0.00M / 53.00M tokens"
+                    let mutable usedReq = 0.0
+                    let mutable limitReq = 8300.0
+                    let mutable usedTok = 0.0
+                    let mutable limitTok = 53000000.0
 
                     try
                         let pingBody = "{\"model\":\"grok-4.5\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":1}"
@@ -1197,22 +1199,22 @@ module UsageFetcher =
                                 | _ -> defaultVal
                             | _ -> defaultVal
 
-                        let limitReq = getHeader "x-ratelimit-limit-requests" 8300.0
+                        limitReq <- getHeader "x-ratelimit-limit-requests" 8300.0
                         let remReq = getHeader "x-ratelimit-remaining-requests" 8300.0
-                        let usedReq = Math.Max(0.0, limitReq - remReq)
+                        usedReq <- Math.Max(0.0, limitReq - remReq)
                         usedReqPct <- Math.Clamp((usedReq / limitReq) * 100.0, 0.0, 100.0)
-                        reqText <- sprintf "%.0f / %.0f requests" usedReq limitReq
 
-                        let limitTok = getHeader "x-ratelimit-limit-tokens" 53000000.0
+                        limitTok <- getHeader "x-ratelimit-limit-tokens" 53000000.0
                         let remTok = getHeader "x-ratelimit-remaining-tokens" 53000000.0
-                        let usedTok = Math.Max(0.0, limitTok - remTok)
+                        usedTok <- Math.Max(0.0, limitTok - remTok)
                         usedTokPct <- Math.Clamp((usedTok / limitTok) * 100.0, 0.0, 100.0)
-                        tokText <- sprintf "%.2fM / %.2fM tokens" (usedTok / 1000000.0) (limitTok / 1000000.0)
                     with _ -> ()
 
+                    let overallUsedPct = Math.Max(usedReqPct, usedTokPct)
+                    let textOverride = sprintf "%.0f / %.0f reqs • %.2fM / %.2fM tokens" usedReq limitReq (usedTok / 1000000.0) (limitTok / 1000000.0)
+
                     let windows = [
-                        ("Weekly (Reqs)", usedReqPct, resetCountdown, 7 * 24 * 3600, Some reqText)
-                        ("Weekly (Tokens)", usedTokPct, resetCountdown, 7 * 24 * 3600, Some tokText)
+                        ("Weekly", overallUsedPct, resetCountdown, 7 * 24 * 3600, Some textOverride)
                     ]
 
                     let footer = sprintf "Grok CLI (%s)" (if String.IsNullOrEmpty email then "Active" else email)
