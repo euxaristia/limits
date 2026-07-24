@@ -1245,67 +1245,41 @@ module UsageFetcher =
                             let mutable emailProp = new JsonElement()
                             if root.TryGetProperty("email", &emailProp) && emailProp.ValueKind = JsonValueKind.String then emailProp.GetString() else ""
 
-                    let resetCountdown =
+                    let mutable usedPct = 0.0
+                    let mutable resetCountdown =
                         match tokenOpt with
                         | Some t when t.ExpiresAt.IsSome -> DateParser.formatCountdown (t.ExpiresAt.Value.ToString("o"))
                         | _ -> "Active"
 
-                    let logUsageOpt = tryReadGrokLogUsage()
-                    match logUsageOpt with
-                    | Some (logPct, logReset) ->
-                        let details = sprintf "%.0f%% used" logPct
-                        let windows = [
-                            ("Weekly", logPct, logReset, 7 * 24 * 3600, Some details)
-                        ]
-                        let footer = sprintf "Grok CLI (%s)" (if String.IsNullOrEmpty email then "Active" else email)
-                        return multiWindow provider "grok" name windows "healthy" false false "" footer
-                    | None ->
-
-                    let mutable usedReqPct = 0.0
-                    let mutable usedTokPct = 0.0
-                    let mutable usedReq = 0.0
-                    let mutable limitReq = 216.0
-                    let mutable usedTok = 0.0
-                    let mutable limitTok = 9000000.0
-
                     try
-                        let pingBody = "{\"model\":\"grok-build\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":1}"
-                        use pingReq = new HttpRequestMessage(HttpMethod.Post, "https://cli-chat-proxy.grok.com/v1/chat/completions")
-                        setupHeaders pingReq.Headers
-                        pingReq.Headers.UserAgent.Clear()
-                        pingReq.Headers.UserAgent.ParseAdd("grok/0.2.111")
-                        pingReq.Headers.Add("x-grok-client-version", "0.2.111")
-                        pingReq.Headers.Authorization <- AuthenticationHeaderValue("Bearer", bearerToken.Trim())
-                        pingReq.Content <- new StringContent(pingBody, System.Text.Encoding.UTF8, "application/json")
+                        use billingReq = new HttpRequestMessage(HttpMethod.Get, "https://cli-chat-proxy.grok.com/v1/billing?format=credits")
+                        setupHeaders billingReq.Headers
+                        billingReq.Headers.UserAgent.Clear()
+                        billingReq.Headers.UserAgent.ParseAdd("grok/0.2.111")
+                        billingReq.Headers.Add("x-grok-client-version", "0.2.111")
+                        billingReq.Headers.Authorization <- AuthenticationHeaderValue("Bearer", bearerToken.Trim())
 
-                        let! pingRes = client.SendAsync(pingReq)
-                        let headers = pingRes.Headers
+                        let! billingRes = client.SendAsync(billingReq)
+                        if billingRes.IsSuccessStatusCode then
+                            let! billingContent = billingRes.Content.ReadAsStringAsync()
+                            use billingDoc = JsonDocument.Parse(billingContent)
+                            let bRoot = billingDoc.RootElement
 
-                        let getHeader (key: string) (defaultVal: float) =
-                            match headers.TryGetValues(key) with
-                            | true, vals ->
-                                let str = Seq.head vals
-                                match Double.TryParse(str) with
-                                | true, v -> v
-                                | _ -> defaultVal
-                            | _ -> defaultVal
+                            let mutable cfgProp = new JsonElement()
+                            if bRoot.TryGetProperty("config", &cfgProp) then
+                                let mutable pctProp = new JsonElement()
+                                if cfgProp.TryGetProperty("creditUsagePercent", &pctProp) && pctProp.ValueKind = JsonValueKind.Number then
+                                    usedPct <- pctProp.GetDouble()
 
-                        limitReq <- getHeader "x-ratelimit-limit-requests" 216.0
-                        let remReq = getHeader "x-ratelimit-remaining-requests" 216.0
-                        usedReq <- Math.Max(0.0, limitReq - remReq)
-                        usedReqPct <- Math.Clamp((usedReq / limitReq) * 100.0, 0.0, 100.0)
-
-                        limitTok <- getHeader "x-ratelimit-limit-tokens" 9000000.0
-                        let remTok = getHeader "x-ratelimit-remaining-tokens" 9000000.0
-                        usedTok <- Math.Max(0.0, limitTok - remTok)
-                        usedTokPct <- Math.Clamp((usedTok / limitTok) * 100.0, 0.0, 100.0)
+                                let mutable periodProp = new JsonElement()
+                                let mutable endProp = new JsonElement()
+                                if cfgProp.TryGetProperty("currentPeriod", &periodProp) && periodProp.TryGetProperty("end", &endProp) && endProp.ValueKind = JsonValueKind.String then
+                                    resetCountdown <- DateParser.formatCountdown (endProp.GetString())
                     with _ -> ()
 
-                    let overallUsedPct = Math.Max(usedReqPct, usedTokPct)
-                    let textOverride = sprintf "%.0f / %.0f reqs • %.2fM / %.2fM tokens" usedReq limitReq (usedTok / 1000000.0) (limitTok / 1000000.0)
-
+                    let details = sprintf "%.0f%% used" usedPct
                     let windows = [
-                        ("Weekly", overallUsedPct, resetCountdown, 7 * 24 * 3600, Some textOverride)
+                        ("Weekly", usedPct, resetCountdown, 7 * 24 * 3600, Some details)
                     ]
 
                     let footer = sprintf "Grok CLI (%s)" (if String.IsNullOrEmpty email then "Active" else email)
