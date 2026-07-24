@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            9.0.x
+            10.0.x
+            11.0.x
+          include-prerelease: true
+
+      - name: Restore Dependencies
+        run: dotnet restore Limits.slnx
+
+      - name: Build Core & CLI Solution
+        run: dotnet build Limits.slnx --configuration Release --no-restore
+
+      - name: Run Core Unit Tests
+        run: dotnet test Tests/Limits.Core.Tests.fsproj --configuration Release --no-build --verbosity normal
+
+      - name: Pack limits-cli Global Tool
+        run: dotnet pack Limits.Cli/Limits.Cli.fsproj --configuration Release --no-build -o ./nupkg
+
+      - name: Upload Package Artifact
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: limits-cli-nupkg
+          path: ./nupkg/*.nupkg
