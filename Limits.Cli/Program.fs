@@ -185,6 +185,18 @@ module Program =
             printfn "  %-12s %s %-16s %s" p.id statusStr displayName keyStr
         printfn ""
 
+    let getVersion () =
+        let assembly = System.Reflection.Assembly.GetExecutingAssembly()
+        let attr = assembly.GetCustomAttributes(typeof<System.Reflection.AssemblyInformationalVersionAttribute>, false)
+        if attr.Length > 0 then
+            let infoAttr = attr.[0] :?> System.Reflection.AssemblyInformationalVersionAttribute
+            let v = infoAttr.InformationalVersion
+            let idx = v.IndexOf('+')
+            if idx > 0 then v.Substring(0, idx) else v
+        else
+            let v = assembly.GetName().Version
+            if v <> null then sprintf "%d.%d.%d" v.Major v.Minor v.Build else "1.0.1"
+
     [<EntryPoint>]
     let main argv =
         let args = argv |> Array.toList
@@ -212,7 +224,7 @@ module Program =
         | "config" :: subArgs ->
             handleConfigCommand subArgs
         | ["-v"] | ["--version"] | ["version"] ->
-            printfn "limits v1.0.0"
+            printfn "limits v%s" (getVersion())
             0
         | ["-h"] | ["--help"] | ["help"] ->
             printHelp()
