@@ -110,10 +110,13 @@ module Program =
                 |> List.map (fun c -> UsageFetcher.fetch c)
                 |> Task.WhenAll
 
+            let isErratic (u: ProviderUsage) =
+                u.Status = "unconfigured" || u.Status = "degraded" || u.Status = "error" || u.HasError
+
             let results =
                 tasks
                 |> Array.toList
-                |> List.filter (fun u -> u.Status <> "unconfigured")
+                |> List.filter (fun u -> not (isErratic u))
 
             if jsonOutput then
                 let options = JsonSerializerOptions(WriteIndented = true)

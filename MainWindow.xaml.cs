@@ -240,8 +240,10 @@ namespace Limits
                 return await UsageFetcher.fetch(providerConfig);
             });
 
-            var usages = await Task.WhenAll(tasks);
-            var configuredUsages = usages.Where(u => u.Status != "unconfigured").ToList();
+            bool IsErratic(ProviderUsage u) =>
+                u.Status == "unconfigured" || u.Status == "degraded" || u.Status == "error" || u.HasError;
+
+            var configuredUsages = usages.Where(u => !IsErratic(u)).ToList();
 
             BuildTabs(configuredUsages.Select(u => u.Provider).ToList());
 
