@@ -1,4 +1,4 @@
-namespace CodexBarWin.Core
+namespace Limits.Core
 
 // Win32 interop for the Antigravity credential reader. Kept separate from
 // Library.fs because F# struct syntax with [StructLayout] and member val

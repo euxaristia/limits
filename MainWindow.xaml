@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <Window
-    x:Class="CodexBarWin.MainWindow"
+    x:Class="Limits.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-    xmlns:local="using:CodexBarWin"
+    xmlns:local="using:Limits"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    Title="CodexBar"
+    Title="Limits"
     mc:Ignorable="d">
     
     <Window.SystemBackdrop>
@@ -29,7 +29,7 @@
 
             <StackPanel Orientation="Horizontal" Grid.Column="0" Spacing="8" VerticalAlignment="Center">
                 <FontIcon Glyph="&#xEC7A;" FontFamily="Segoe MDL2 Assets" Foreground="#FF16D3B4" FontSize="18" />
-                <TextBlock Text="CodexBar" FontWeight="SemiBold" FontSize="16" Foreground="#FFFFFFFF" VerticalAlignment="Center" />
+                <TextBlock Text="Limits" FontWeight="SemiBold" FontSize="16" Foreground="#FFFFFFFF" VerticalAlignment="Center" />
                 <Border CornerRadius="4" Background="#3E3E42" Padding="6,2" Margin="4,0,0,0">
                     <TextBlock Text="F# Core" FontSize="10" Foreground="#FF16D3B4" FontWeight="Bold" />
                 </Border>

@@ -3,7 +3,7 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net11.0-windows10.0.26100.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
-    <RootNamespace>CodexBarWin</RootNamespace>
+    <RootNamespace>Limits</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Platforms>x86;x64;ARM64</Platforms>
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant())</RuntimeIdentifier>
@@ -55,7 +55,7 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.4.0" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="CodexBarWin.Core\CodexBarWin.Core.fsproj" />
+    <ProjectReference Include="Limits.Core\Limits.Core.fsproj" />
   </ItemGroup>
 
   <!--

@@ -1,9 +1,9 @@
 {
   "profiles": {
-    "CodexBarWin (Package)": {
+    "Limits (Package)": {
       "commandName": "MsixPackage"
     },
-    "CodexBarWin (Unpackaged)": {
+    "Limits (Unpackaged)": {
       "commandName": "Project"
     }
   }

@@ -16,9 +16,9 @@ using Microsoft.FSharp.Core;
 using Windows.Graphics;
 using Windows.UI;
 using H.NotifyIcon;
-using CodexBarWin.Core;
+using Limits.Core;
 
-namespace CodexBarWin
+namespace Limits
 {
     public partial class MainWindow : Window
     {
@@ -84,7 +84,7 @@ namespace CodexBarWin
             _taskbarIcon = new TaskbarIcon
             {
                 IconSource = new BitmapImage(new Uri("ms-appx:///Assets/AppIcon.ico")),
-                ToolTipText = "CodexBar"
+                ToolTipText = "Limits"
             };
             // Left-click toggles the popup. Right-click shows a context menu
             // with a Quit option (built in BuildTrayContextMenu below).
@@ -153,7 +153,7 @@ namespace CodexBarWin
             if (hr1 != 0 || hr2 != 0)
             {
                 System.Diagnostics.Debug.WriteLine(
-                    $"[CodexBarWin] DwmSetWindowAttribute failed: immersiveDark={hr1}, borderColor={hr2}");
+                    $"[Limits] DwmSetWindowAttribute failed: immersiveDark={hr1}, borderColor={hr2}");
             }
         }
 
@@ -354,7 +354,7 @@ namespace CodexBarWin
                 ));
             }
 
-            var newConfig = new CodexBarConfig(version: 1, providers: Microsoft.FSharp.Collections.ListModule.OfSeq(configList));
+            var newConfig = new LimitsConfig(version: 1, providers: Microsoft.FSharp.Collections.ListModule.OfSeq(configList));
             ConfigStore.save(newConfig);
 
             DashboardPanel.Visibility = Visibility.Visible;
@@ -372,13 +372,13 @@ namespace CodexBarWin
         private Microsoft.UI.Xaml.Controls.Primitives.FlyoutBase BuildTrayContextMenu()
         {
             // Build the context menu for right-clicking the tray icon.
-            // - Open CodexBar: show the popup
+            // - Open Limits: show the popup
             // - Quit: exit the app
             //
             // The flyout is hosted by the library's SecondWindow (a real
             // XAML window that follows the app's theme). Without a
             // FlyoutPresenterStyle the default ScrollViewer wraps the
-            // content in a fixed-width container, and "Open CodexBar"
+            // content in a fixed-width container, and "Open Limits"
             // gets clipped behind a horizontal scrollbar. We override
             // ScrollViewer.HorizontalScrollBarVisibility = Disabled and
             // set MinWidth on the FlyoutPresenter so the content's
@@ -386,7 +386,7 @@ namespace CodexBarWin
             var menu = new Microsoft.UI.Xaml.Controls.MenuFlyout();
             var openItem = new Microsoft.UI.Xaml.Controls.MenuFlyoutItem
             {
-                Text = "Open CodexBar",
+                Text = "Open Limits",
                 Width = 200
             };
             openItem.Click += (s, e) => ShowWindow();

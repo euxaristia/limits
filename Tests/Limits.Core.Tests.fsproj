@@ -19,7 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\CodexBarWin.Core\CodexBarWin.Core.fsproj" />
+    <ProjectReference Include="..\Limits.Core\Limits.Core.fsproj" />
   </ItemGroup>
 
 </Project>
