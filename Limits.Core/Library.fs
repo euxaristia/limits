@@ -1211,8 +1211,8 @@ module UsageFetcher =
                     with _ -> ()
 
                     let windows = [
-                        ("Requests", usedReqPct, resetCountdown, 86400, Some reqText)
-                        ("Tokens", usedTokPct, resetCountdown, 86400, Some tokText)
+                        ("Weekly (Reqs)", usedReqPct, resetCountdown, 7 * 24 * 3600, Some reqText)
+                        ("Weekly (Tokens)", usedTokPct, resetCountdown, 7 * 24 * 3600, Some tokText)
                     ]
 
                     let footer = sprintf "Grok CLI (%s)" (if String.IsNullOrEmpty email then "Active" else email)
