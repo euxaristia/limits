@@ -234,22 +234,20 @@ namespace Limits
             // Build the tabs strip from the enabled providers only, so tabs and
             // body stay in sync. Disabled providers are intentionally hidden from
             // the strip - they can be enabled via the Settings panel.
-            BuildTabs(activeConfigs.Select(ac => ProviderMapping.fromString(ac.id)).ToList());
-
             // Create view models
             var tasks = activeConfigs.Select(async providerConfig =>
             {
-                var usage = await UsageFetcher.fetch(providerConfig);
-                return new ProviderViewModel(usage);
+                return await UsageFetcher.fetch(providerConfig);
             });
 
-            var viewModels = await Task.WhenAll(tasks);
-            // Sort alphabetically by display name so the tab strip (built
-            // above from activeConfigs) and the Overview body (bound to
-            // Providers) show the same order.
-            foreach (var vm in viewModels.OrderBy(vm => vm.DisplayName, StringComparer.OrdinalIgnoreCase))
+            var usages = await Task.WhenAll(tasks);
+            var configuredUsages = usages.Where(u => u.Status != "unconfigured").ToList();
+
+            BuildTabs(configuredUsages.Select(u => u.Provider).ToList());
+
+            foreach (var usage in configuredUsages.OrderBy(u => u.DisplayName, StringComparer.OrdinalIgnoreCase))
             {
-                Providers.Add(vm);
+                Providers.Add(new ProviderViewModel(usage));
             }
         }
 
