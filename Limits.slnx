@@ -4,5 +4,4 @@
   </Folder>
   <Project Path="Limits.Cli/Limits.Cli.fsproj" />
   <Project Path="Limits.Core/Limits.Core.fsproj" />
-  <Project Path="Limits.csproj" />
 </Solution>

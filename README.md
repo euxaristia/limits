@@ -1,54 +1,55 @@
-# Limits 🎚️
+# limits 🎚️
 
-Every AI coding limit & quota, right in your terminal and system tray.
+Every AI coding limit & quota, right in your terminal.
 
-**Limits** is a cross-platform monitoring suite for AI model quotas, API limits, and token usage (OpenAI, Claude, Gemini, Antigravity, Cursor, DeepSeek, OpenRouter, ElevenLabs, Groq, AWS Bedrock).
+**`limits`** is a fast, cross-platform command-line interface and monitoring engine for AI model quotas, API limits, and token usage (OpenAI, Claude, Gemini, Antigravity, Cursor, DeepSeek, OpenRouter, ElevenLabs, Groq, AWS Bedrock).
 
-It consists of:
-1. **`limits` CLI** (Cross-platform — macOS, Linux, Windows): A lightweight command-line interface for viewing quotas, managing configuration, and exporting raw JSON for bar applets (Waybar, SketchyBar, Polybar, Rofi, tmux).
-2. **`Limits.Core`** (Cross-platform F# Library): Shared engine for domain models, JSON configuration, cross-platform credential resolution, and parallel API fetchers.
-3. **`Limits` GUI Status Bar** (Windows): A native Windows App SDK / WinUI 3 system tray application with Mica backdrop popovers.
+Designed to be run as an interactive terminal CLI or piped directly into status bars (Waybar, SketchyBar, Polybar, Rofi, tmux, etc.) via raw JSON output mode.
 
 ---
 
-## Features
+## ✨ Features
 
-- **Cross-Platform CLI**: Interactive terminal output with progress bars, status indicators, and ANSI color formatting.
-- **JSON Output Mode**: Pass `--json` to pipe structured metrics to status bars, scripts, or command launchers on macOS, Linux, or Windows.
-- **Native Windows System Tray GUI**: Lives quietly in your Notification Area via `H.NotifyIcon` with a borderless `MicaBackdrop` popover.
-- **Shared Configuration**: Shared config format at `~/.config/limits/config.json` (with automatic fallback to `~/.config/codexbar/config.json` and `LIMITS_CONFIG` env var overrides).
-- **Parallel Provider Fetching**: Concurrent API usage requests for fast response times.
-
----
-
-## Project Architecture
-
-```
-Limits.slnx
-├── Limits.Core/         # Shared cross-platform F# core library (Models, Fetchers, ConfigStore)
-├── Limits.Cli/          # Cross-platform CLI executable (`limits`)
-├── Limits/              # Windows App SDK / WinUI 3 tray app
-└── Tests/               # Unit tests (xUnit)
-```
+- **Cross-Platform CLI**: Interactive terminal output with progress bars, status indicators, and ANSI color formatting (macOS, Linux, Windows).
+- **JSON Output Mode**: Pass `--json` to pipe structured metrics directly to status bar scripts, custom widgets, or command launchers.
+- **Single-Provider Filtering**: Filter output to specific providers using `-p` / `--provider` (e.g. `-p claude`, `-p antigravity`).
+- **Parallel Provider Fetching**: Concurrent API usage requests for rapid response times.
+- **Unified Configuration**: Shared config format stored at `~/.config/limits/config.json` (with automatic fallback to `~/.config/codexbar/config.json` and `LIMITS_CONFIG` environment variable overrides).
+- **Cross-Platform Credential Resolution**: Automatically detects tokens & credentials from local CLI environments (e.g. `gcloud`, OAuth tokens, environment variables).
 
 ---
 
-## CLI Usage (`limits`)
+## 💻 Installation & Requirements
 
-### Build & Run CLI
+### Requirements
+
+- **.NET 11 SDK** or runtime (macOS, Linux, Windows)
+
+### Installing as a Global .NET Tool
 
 ```bash
+# Pack and install locally
+dotnet pack Limits.Cli/Limits.Cli.fsproj -c Release -o ./nupkg
+dotnet tool install --global --add-source ./nupkg Limits.Cli
+```
+
+### Building & Running from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/euxaristia/limits.git
+cd limits
+
 # Run CLI status check
 dotnet run --project Limits.Cli/Limits.Cli.fsproj -- status
 
 # Run CLI with JSON output
 dotnet run --project Limits.Cli/Limits.Cli.fsproj -- --json
-
-# Filter to a specific provider
-dotnet run --project Limits.Cli/Limits.Cli.fsproj -- -p claude
 ```
 
-### CLI Commands & Flags
+---
+
+## 🛠️ CLI Usage & Commands
 
 ```text
 USAGE:
@@ -71,19 +72,44 @@ OPTIONS:
   --no-color              Disable colored terminal output
 ```
 
----
+### Example Commands
 
-## Windows Status Bar GUI
+```bash
+# View all enabled AI provider status in formatted terminal table
+limits status
 
-### Build & Run GUI App
+# Get JSON payload for Waybar or tmux status bar
+limits --json
 
-```powershell
-dotnet run --project Limits.csproj
+# Check Antigravity quota specifically
+limits status -p antigravity
+
+# Enable or disable a provider
+limits config enable claude
+limits config disable openrouter
 ```
 
 ---
 
-## Requirements
+## 🏗️ Architecture
 
-- **CLI (`limits`)**: .NET 11 SDK or runtime (macOS, Linux, Windows)
-- **GUI App**: Windows 10/11 (x64 / ARM64) with .NET 11 SDK or later
+```
+limits/
+├── Limits.Core/         # Shared cross-platform F# core library (Models, Fetchers, ConfigStore)
+├── Limits.Cli/          # Cross-platform CLI executable (`limits`)
+├── Tests/               # Unit test suite (xUnit)
+└── Limits.slnx          # .NET Solution file
+```
+
+---
+
+## 🖥️ Desktop App
+
+Looking for the Windows Desktop / System Tray app?
+See the companion private repository: [**`limits-windows`**](https://github.com/euxaristia/limits-windows) (WinUI 3 tray application with Mica backdrop popover).
+
+---
+
+## 📄 License
+
+MIT License.
