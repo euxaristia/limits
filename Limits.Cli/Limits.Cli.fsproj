@@ -8,7 +8,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>limits</ToolCommandName>
     <PackageId>limits-cli</PackageId>
-    <Version>1.0.17</Version>
+    <Version>1.0.18</Version>
     <Description>Cross-platform CLI tool for monitoring AI provider quotas and usage limits (OpenAI, Claude, Gemini, Antigravity, Cursor, DeepSeek, OpenRouter, ElevenLabs, Groq, AWS Bedrock).</Description>
   </PropertyGroup>
 
