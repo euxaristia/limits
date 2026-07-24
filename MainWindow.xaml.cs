@@ -508,6 +508,10 @@ namespace Limits
                     gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF0D9488"), Offset = 0.0 });
                     gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF14B8A6"), Offset = 1.0 });
                     break;
+                case UsageProvider.Grok:
+                    gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF1F2937"), Offset = 0.0 });
+                    gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF4B5563"), Offset = 1.0 });
+                    break;
                 default:
                     gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF06B6D4"), Offset = 0.0 });
                     gradient.GradientStops.Add(new GradientStop { Color = ColorHelper.ToColor("FF3B82F6"), Offset = 1.0 });

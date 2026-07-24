@@ -21,6 +21,7 @@ type UsageProvider =
     | Bedrock = 9
     | Unknown = 10
     | Antigravity = 11
+    | Grok = 12
 
 module ProviderMapping =
     let toString = function
@@ -35,6 +36,7 @@ module ProviderMapping =
         | UsageProvider.Groq -> "groq"
         | UsageProvider.Bedrock -> "bedrock"
         | UsageProvider.Antigravity -> "antigravity"
+        | UsageProvider.Grok -> "grok"
         | _ -> "unknown"
 
     let fromString = function
@@ -49,6 +51,7 @@ module ProviderMapping =
         | "groq" -> UsageProvider.Groq
         | "bedrock" -> UsageProvider.Bedrock
         | "antigravity" -> UsageProvider.Antigravity
+        | "grok" -> UsageProvider.Grok
         | _ -> UsageProvider.Unknown
 
     let getDisplayName = function
@@ -63,6 +66,7 @@ module ProviderMapping =
         | UsageProvider.Groq -> "Groq"
         | UsageProvider.Bedrock -> "AWS Bedrock"
         | UsageProvider.Antigravity -> "Antigravity"
+        | UsageProvider.Grok -> "Grok"
         | _ -> "Unknown"
 
 type ProviderConfig = {
@@ -151,6 +155,7 @@ module ConfigStore =
             { id = "openrouter"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
             { id = "elevenlabs"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
             { id = "antigravity"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
+            { id = "grok"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
         ]
         { version = 1; providers = defaultProviders }
 
@@ -160,7 +165,14 @@ module ConfigStore =
             if File.Exists(path) then
                 let json = File.ReadAllText(path)
                 let options = JsonSerializerOptions(PropertyNameCaseInsensitive = true)
-                JsonSerializer.Deserialize<LimitsConfig>(json, options)
+                let loaded = JsonSerializer.Deserialize<LimitsConfig>(json, options)
+                if box loaded <> null && box loaded.providers <> null then
+                    let hasGrok = loaded.providers |> List.exists (fun p -> p.id.Equals("grok", StringComparison.OrdinalIgnoreCase))
+                    if not hasGrok then
+                        let grokEntry = { id = "grok"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
+                        { loaded with providers = loaded.providers @ [grokEntry] }
+                    else loaded
+                else loaded
             else
                 let defaultConfig = createDefaultConfig()
                 let dir = Path.GetDirectoryName(path)
@@ -302,6 +314,50 @@ module AntigravityCredentials =
                     raise (AntigravityCredentialsError(sprintf "Failed to parse Antigravity credential file at %s: %s" path ex.Message))
             | None ->
                 raise (AntigravityCredentialsError("No Antigravity credential found on macOS/Linux. Sign in via `agy` CLI."))
+
+module GrokCredentials =
+    type Token = {
+        AccessToken: string
+        Email: string
+        ExpiresAt: DateTime option
+        AuthMode: string
+    }
+
+    let load () : Token option =
+        try
+            let home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            let path = Path.Combine(home, ".grok", "auth.json")
+            if File.Exists(path) then
+                let json = File.ReadAllText(path)
+                use doc = JsonDocument.Parse(json)
+                let root = doc.RootElement
+                if root.ValueKind = JsonValueKind.Object then
+                    let props = root.EnumerateObject() |> Seq.toList
+                    if not (List.isEmpty props) then
+                        let entry = props.[0].Value
+                        let mutable keyProp = new JsonElement()
+                        if entry.TryGetProperty("key", &keyProp) && keyProp.ValueKind = JsonValueKind.String then
+                            let tokenStr = keyProp.GetString()
+                            let email =
+                                let mutable p = new JsonElement()
+                                if entry.TryGetProperty("email", &p) && p.ValueKind = JsonValueKind.String then p.GetString() else ""
+                            let authMode =
+                                let mutable p = new JsonElement()
+                                if entry.TryGetProperty("auth_mode", &p) && p.ValueKind = JsonValueKind.String then p.GetString() else "oidc"
+                            let expiresAt =
+                                let mutable p = new JsonElement()
+                                if entry.TryGetProperty("expires_at", &p) && p.ValueKind = JsonValueKind.String then
+                                    let s = p.GetString()
+                                    match DateTime.TryParse(s) with
+                                    | true, d -> Some d
+                                    | _ -> None
+                                else None
+                            Some { AccessToken = tokenStr; Email = email; ExpiresAt = expiresAt; AuthMode = authMode }
+                        else None
+                    else None
+                else None
+            else None
+        with _ -> None
 
 module DateParser =
     let formatCountdown (resetsAtStr: string) =
@@ -1077,6 +1133,55 @@ module UsageFetcher =
                 0.0 100.0 "N/A" "degraded" false true ex.Message ""
     }
 
+    let private fetchGrokUsage (tokenOpt: GrokCredentials.Token option) (apiKey: string) : Task<ProviderUsage> = task {
+        let provider = UsageProvider.Grok
+        let name = ProviderMapping.getDisplayName provider
+        let bearerToken =
+            match tokenOpt with
+            | Some t -> t.AccessToken
+            | None -> apiKey
+
+        if String.IsNullOrWhiteSpace(bearerToken) then
+            return getUnconfiguredData provider
+        else
+            try
+                use request = new HttpRequestMessage(HttpMethod.Get, "https://cli-chat-proxy.grok.com/v1/user")
+                setupHeaders request.Headers
+                request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", bearerToken.Trim())
+
+                let! response = client.SendAsync(request)
+                if response.IsSuccessStatusCode then
+                    let! content = response.Content.ReadAsStringAsync()
+                    use doc = JsonDocument.Parse(content)
+                    let root = doc.RootElement
+                    let mutable hasCodeProp = new JsonElement()
+                    let hasCodeAccess =
+                        root.TryGetProperty("hasGrokCodeAccess", &hasCodeProp) && hasCodeProp.ValueKind = JsonValueKind.True
+
+                    let email =
+                        match tokenOpt with
+                        | Some t when not (String.IsNullOrEmpty t.Email) -> t.Email
+                        | _ ->
+                            let mutable emailProp = new JsonElement()
+                            if root.TryGetProperty("email", &emailProp) && emailProp.ValueKind = JsonValueKind.String then emailProp.GetString() else ""
+
+                    let resetCountdown =
+                        match tokenOpt with
+                        | Some t when t.ExpiresAt.IsSome -> DateParser.formatCountdown (t.ExpiresAt.Value.ToString("o"))
+                        | _ -> "Active"
+
+                    let windows = [("Grok Sub", 0.0, resetCountdown, 0, Some (if hasCodeAccess then "Code Access Active" else "Active"))]
+
+                    let footer = sprintf "Grok CLI (%s)" (if String.IsNullOrEmpty email then "Active" else email)
+                    return multiWindow provider "grok" name windows "healthy" false false "" footer
+                else
+                    let! errStr = response.Content.ReadAsStringAsync()
+                    let errMsg = sprintf "Grok API status %d" (int response.StatusCode)
+                    return singleWindow provider "grok" name 0.0 100.0 "N/A" "degraded" false true errMsg ""
+            with ex ->
+                return singleWindow provider "grok" name 0.0 100.0 "N/A" "degraded" false true ex.Message ""
+    }
+
     let fetch (config: ProviderConfig) : Task<ProviderUsage> = task {
         let provider = ProviderMapping.fromString config.id
 
@@ -1122,6 +1227,9 @@ module UsageFetcher =
             return! fetchGeminiUsage ()
         | UsageProvider.Antigravity ->
             return! fetchAntigravityUsage ()
+        | UsageProvider.Grok ->
+            let grokToken = GrokCredentials.load()
+            return! fetchGrokUsage grokToken config.apiKey
         | _ ->
             return getUnconfiguredData provider
     }
