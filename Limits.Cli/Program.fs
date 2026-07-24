@@ -110,17 +110,24 @@ module Program =
                 |> List.map (fun c -> UsageFetcher.fetch c)
                 |> Task.WhenAll
 
-            let results = tasks |> Array.toList
+            let results =
+                tasks
+                |> Array.toList
+                |> List.filter (fun u -> u.Status <> "unconfigured")
 
             if jsonOutput then
                 let options = JsonSerializerOptions(WriteIndented = true)
                 let json = JsonSerializer.Serialize(results, options)
                 printfn "%s" json
             else
-                printfn "%s" (Terminal.bold "── AI Limits & Quotas ────────────────────────────────")
-                printfn ""
-                for r in results do
-                    renderUsage r
+                if List.isEmpty results then
+                    printfn "%s" (Terminal.yellow "No configured providers active.")
+                    printfn "Run 'limits providers' to view available providers or set an API key with 'limits config set-key <id> <key>'."
+                else
+                    printfn "%s" (Terminal.bold "── AI Limits & Quotas ────────────────────────────────")
+                    printfn ""
+                    for r in results do
+                        renderUsage r
             return 0
     }
 
