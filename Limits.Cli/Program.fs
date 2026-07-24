@@ -55,15 +55,18 @@ module Program =
 
     let renderUsage (u: ProviderUsage) =
         let statusBadge =
-            if u.HasError then Terminal.red "[ERROR]"
+            if u.Status = "unconfigured" then Terminal.dim "[UNCONFIGURED]"
+            elif u.HasError then Terminal.red "[ERROR]"
             elif u.Status = "degraded" then Terminal.yellow "[DEGRADED]"
-            elif u.IsMock then Terminal.dim "[MOCK]"
             else Terminal.green "[OK]"
 
         printfn "%s %s" (Terminal.bold u.DisplayName) statusBadge
 
         if u.HasError then
-            printfn "  %s" (Terminal.red (sprintf "Error: %s" u.ErrorMessage))
+            if u.Status = "unconfigured" then
+                printfn "  %s" (Terminal.dim u.ErrorMessage)
+            else
+                printfn "  %s" (Terminal.red (sprintf "Error: %s" u.ErrorMessage))
         else
             for w in u.Windows do
                 let bar = Terminal.renderProgressBar w.UsedPercent 20

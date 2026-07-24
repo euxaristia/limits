@@ -109,9 +109,6 @@
                                             <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                                                 <Ellipse Width="6" Height="6" Fill="{x:Bind StatusBrush}" VerticalAlignment="Center" />
                                                 <TextBlock Text="{x:Bind DisplayName, Mode=OneTime}" FontWeight="SemiBold" FontSize="12" Foreground="#FFFFFFFF" />
-                                                <Border CornerRadius="3" Background="#2A2A2E" Padding="3,0" Visibility="{x:Bind IsMockVisibility}">
-                                                    <TextBlock Text="MOCK" FontSize="8" Foreground="#FF8B8B90" FontWeight="Bold" />
-                                                </Border>
                                             </StackPanel>
                                             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                                                 <TextBlock Text="{x:Bind Windows[0].PercentText, Mode=OneTime}" FontSize="11" Foreground="#FF8B8B90" FontWeight="SemiBold" />
