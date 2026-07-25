@@ -173,8 +173,8 @@ let ``Gemini buckets are always ordered before Claude buckets`` () =
 
 [<Fact>]
 let ``EmailRedactor redacts email addresses correctly`` () =
-    let redacted = EmailRedactor.redact "Grok CLI (cq4gppc54z@privaterelay.appleid.com)"
-    Assert.Equal("Grok CLI (c***z@privaterelay.appleid.com)", redacted)
+    let redacted = EmailRedactor.redact "Grok CLI (cq4gppc54z@privaterelay.example.com)"
+    Assert.Equal("Grok CLI (c***z@privaterelay.example.com)", redacted)
 
-    let redactedUser = EmailRedactor.redact "Account: user.name@domain.com"
-    Assert.Equal("Account: u***e@domain.com", redactedUser)
+    let redactedUser = EmailRedactor.redact "Account: user.name@example.com"
+    Assert.Equal("Account: u***e@example.com", redactedUser)
