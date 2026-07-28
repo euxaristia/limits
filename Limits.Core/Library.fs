@@ -22,6 +22,7 @@ type UsageProvider =
     | Unknown = 10
     | Antigravity = 11
     | Grok = 12
+    | Copilot = 13
 
 module ProviderMapping =
     let toString = function
@@ -37,6 +38,7 @@ module ProviderMapping =
         | UsageProvider.Bedrock -> "bedrock"
         | UsageProvider.Antigravity -> "antigravity"
         | UsageProvider.Grok -> "grok"
+        | UsageProvider.Copilot -> "copilot"
         | _ -> "unknown"
 
     let fromString = function
@@ -52,6 +54,7 @@ module ProviderMapping =
         | "bedrock" -> UsageProvider.Bedrock
         | "antigravity" -> UsageProvider.Antigravity
         | "grok" -> UsageProvider.Grok
+        | "copilot" -> UsageProvider.Copilot
         | _ -> UsageProvider.Unknown
 
     let getDisplayName = function
@@ -67,6 +70,7 @@ module ProviderMapping =
         | UsageProvider.Bedrock -> "AWS Bedrock"
         | UsageProvider.Antigravity -> "Antigravity"
         | UsageProvider.Grok -> "Grok"
+        | UsageProvider.Copilot -> "GitHub Copilot"
         | _ -> "Unknown"
 
 type ProviderConfig = {
@@ -156,6 +160,7 @@ module ConfigStore =
             { id = "elevenlabs"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
             { id = "antigravity"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
             { id = "grok"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
+            { id = "copilot"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
         ]
         { version = 1; providers = defaultProviders }
 
@@ -1144,6 +1149,7 @@ module UsageFetcher =
             | UsageProvider.Bedrock -> "AWS credentials required"
             | UsageProvider.Cursor -> "API key or token required"
             | UsageProvider.Codex -> "API key or token required"
+            | UsageProvider.Copilot -> "API key and organization required. Set with 'limits config set-key copilot <token>' and set the provider 'region' to your org name"
             | _ -> "Credentials or API key required"
         {
             Provider = provider
@@ -1357,6 +1363,52 @@ module UsageFetcher =
                 return singleWindow provider "grok" name 0.0 100.0 "N/A" "degraded" false true ex.Message ""
     }
 
+    let private fetchCopilotUsage (apiKey: string) (org: string) : Task<ProviderUsage> = task {
+        let provider = UsageProvider.Copilot
+        let name = ProviderMapping.getDisplayName provider
+        try
+            use request = new HttpRequestMessage(HttpMethod.Get, sprintf "https://api.github.com/orgs/%s/copilot/billing" org)
+            setupHeaders request.Headers
+            // Prefer application/vnd.github+json for Copilot endpoints
+            request.Headers.Accept.Clear()
+            request.Headers.Accept.ParseAdd("application/vnd.github+json")
+            request.Headers.Add("X-GitHub-Api-Version", "2026-03-10")
+            request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", apiKey.Trim())
+
+            let! response = client.SendAsync(request)
+            if response.IsSuccessStatusCode then
+                let! content = response.Content.ReadAsStringAsync()
+                use doc = JsonDocument.Parse(content)
+                let root = doc.RootElement
+
+                let mutable totalSeats = 0.0
+                let mutable activeSeats = 0.0
+                let mutable planType = ""
+
+                let mutable sb = new JsonElement()
+                if root.TryGetProperty("seat_breakdown", &sb) && sb.ValueKind = JsonValueKind.Object then
+                    let mutable p = new JsonElement()
+                    if sb.TryGetProperty("total", &p) && p.ValueKind = JsonValueKind.Number then totalSeats <- p.GetDouble()
+                    if sb.TryGetProperty("active_this_cycle", &p) && p.ValueKind = JsonValueKind.Number then activeSeats <- p.GetDouble()
+                let mutable pt = new JsonElement()
+                if root.TryGetProperty("plan_type", &pt) && pt.ValueKind = JsonValueKind.String then planType <- pt.GetString()
+
+                // Compute used as active seats, limit as total seats
+                return singleWindow
+                    provider "copilot" name
+                    activeSeats totalSeats "N/A" "healthy" false false "" (sprintf "Plan: %s" planType)
+            else
+                return singleWindow
+                    provider "copilot" name
+                    0.0 100.0 "N/A" "degraded" false true
+                    (sprintf "Copilot API returned status %d" (int response.StatusCode))
+                    ""
+        with ex ->
+            return singleWindow
+                provider "copilot" name
+                0.0 100.0 "N/A" "degraded" false true ex.Message ""
+    }
+
     let fetch (config: ProviderConfig) : Task<ProviderUsage> = task {
         let provider = ProviderMapping.fromString config.id
 
@@ -1398,6 +1450,11 @@ module UsageFetcher =
             return! fetchDeepSeekBalance config.apiKey
         | UsageProvider.OpenRouter when hasApiKey ->
             return! fetchOpenRouterBalance config.apiKey
+        | UsageProvider.Copilot when hasApiKey ->
+            if not (String.IsNullOrWhiteSpace(config.region)) then
+                return! fetchCopilotUsage config.apiKey config.region
+            else
+                return getUnconfiguredData provider
         | UsageProvider.Gemini ->
             return! fetchGeminiUsage ()
         | UsageProvider.Antigravity ->
