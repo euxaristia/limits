@@ -479,9 +479,7 @@ module AntigravityUsageParser =
             | true, date ->
                 let diff = date.ToUniversalTime() - DateTime.UtcNow
                 if diff.TotalHours <= 8.0 then "Session"
-                elif diff.TotalHours <= 36.0 then "Daily"
-                elif diff.TotalHours <= 200.0 then "Weekly"
-                else "Quota"
+                else "Weekly"
             | _ ->
                 if countdown.EndsWith("h") || (countdown.Contains("h ") && not (countdown.Contains("d"))) then "Session"
                 elif countdown.Contains("d") then "Weekly"
