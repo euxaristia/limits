@@ -22,6 +22,7 @@ type UsageProvider =
     | Unknown = 10
     | Antigravity = 11
     | Grok = 12
+    | Copilot = 13
 
 module ProviderMapping =
     let toString = function
@@ -37,6 +38,7 @@ module ProviderMapping =
         | UsageProvider.Bedrock -> "bedrock"
         | UsageProvider.Antigravity -> "antigravity"
         | UsageProvider.Grok -> "grok"
+        | UsageProvider.Copilot -> "copilot"
         | _ -> "unknown"
 
     let fromString = function
@@ -52,6 +54,7 @@ module ProviderMapping =
         | "bedrock" -> UsageProvider.Bedrock
         | "antigravity" -> UsageProvider.Antigravity
         | "grok" -> UsageProvider.Grok
+        | "copilot" -> UsageProvider.Copilot
         | _ -> UsageProvider.Unknown
 
     let getDisplayName = function
@@ -67,6 +70,7 @@ module ProviderMapping =
         | UsageProvider.Bedrock -> "AWS Bedrock"
         | UsageProvider.Antigravity -> "Antigravity"
         | UsageProvider.Grok -> "Grok"
+        | UsageProvider.Copilot -> "GitHub Copilot"
         | _ -> "Unknown"
 
 type ProviderConfig = {
@@ -156,6 +160,7 @@ module ConfigStore =
             { id = "elevenlabs"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
             { id = "antigravity"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
             { id = "grok"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
+            { id = "copilot"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
         ]
         { version = 1; providers = defaultProviders }
 
@@ -168,10 +173,15 @@ module ConfigStore =
                 let loaded = JsonSerializer.Deserialize<LimitsConfig>(json, options)
                 if box loaded <> null && box loaded.providers <> null then
                     let hasGrok = loaded.providers |> List.exists (fun p -> p.id.Equals("grok", StringComparison.OrdinalIgnoreCase))
+                    let hasCopilot = loaded.providers |> List.exists (fun p -> p.id.Equals("copilot", StringComparison.OrdinalIgnoreCase))
+                    let mutable updated = loaded
                     if not hasGrok then
                         let grokEntry = { id = "grok"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
-                        { loaded with providers = loaded.providers @ [grokEntry] }
-                    else loaded
+                        updated <- { updated with providers = updated.providers @ [grokEntry] }
+                    if not hasCopilot then
+                        let copilotEntry = { id = "copilot"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
+                        updated <- { updated with providers = updated.providers @ [copilotEntry] }
+                    updated
                 else loaded
             else
                 let defaultConfig = createDefaultConfig()
@@ -1144,6 +1154,7 @@ module UsageFetcher =
             | UsageProvider.Bedrock -> "AWS credentials required"
             | UsageProvider.Cursor -> "API key or token required"
             | UsageProvider.Codex -> "API key or token required"
+            | UsageProvider.Copilot -> "API key and organization required. Set with 'limits config set-key copilot <token>' and set the provider 'region' to your org name"
             | _ -> "Credentials or API key required"
         {
             Provider = provider
