@@ -27,7 +27,7 @@ let ``Single Gemini bucket parses correctly`` () =
     Assert.Single(r)
     let b = r |> List.head
     Assert.Equal("Gemini", b.GroupLabel)
-    Assert.Equal("gemini-3-1-pro-low", b.Members)
+    Assert.Equal("Gemini Pro", b.Members)
     Assert.Equal(55.0, b.UsedPercent, 1)
     Assert.Equal(45.0, b.RemainingPercent, 1)
     Assert.StartsWith("3h", b.ResetCountdown)
@@ -120,7 +120,7 @@ let ``Bucket without modelId is dropped`` () =
     let r = parseJson json
     Assert.Single(r)
     let b = r |> List.head
-    Assert.Equal("gemini-3-1-pro", b.Members)
+    Assert.Equal("Gemini Pro", b.Members)
 
 [<Fact>]
 let ``Used percent is clamped to 0..100`` () =
@@ -131,7 +131,7 @@ let ``Used percent is clamped to 0..100`` () =
     let r = parseJson json
     Assert.Single(r)
     let b = r |> List.head
-    Assert.Equal(2, b.Members.Split(',').Length)
+    Assert.Equal(1, b.Members.Split(',').Length)
     Assert.InRange(b.UsedPercent, 0.0, 100.0)
     Assert.InRange(b.RemainingPercent, 0.0, 100.0)
 
@@ -144,7 +144,7 @@ let ``Real Antigravity response shape parses into 2 Gemini + 2 Claude/GPT bucket
     let resetWeek = "2026-07-01T01:54:33Z"
     let gem1 = sprintf """{ "modelId": "gemini-2-5-pro", "remainingFraction": 0.97, "resetTime": "%s", "tokenType": "WTUS" }""" reset5h
     let gem2 = sprintf """{ "modelId": "gemini-3-1-pro-low", "remainingFraction": 0.97, "resetTime": "%s", "tokenType": "WTUS" }""" reset5h
-    let gem3 = sprintf """{ "modelId": "gemini-3-1-pro-high", "remainingFraction": 0.97, "resetTime": "%s", "tokenType": "WTUS" }""" reset5h
+    let gem3 = sprintf """{ "modelId": "gemini-3-1-flash", "remainingFraction": 0.97, "resetTime": "%s", "tokenType": "WTUS" }""" reset5h
     let claude1 = sprintf """{ "modelId": "claude-sonnet-4-6", "remainingFraction": 0, "resetTime": "%s", "tokenType": "WTUS" }""" resetWeek
     let claude2 = sprintf """{ "modelId": "claude-opus-4-6-thinking", "remainingFraction": 0, "resetTime": "%s", "tokenType": "WTUS" }""" resetWeek
     let gpt1 = sprintf """{ "modelId": "gpt-oss-120b-medium", "remainingFraction": 0, "resetTime": "%s", "tokenType": "WTUS" }""" resetWeek
@@ -154,7 +154,7 @@ let ``Real Antigravity response shape parses into 2 Gemini + 2 Claude/GPT bucket
     Assert.Equal(2, List.length r)
     let gem = r |> List.find (fun b -> b.GroupLabel = "Gemini")
     let cgpt = r |> List.find (fun b -> b.GroupLabel = "Claude & GPT")
-    Assert.Equal(3, gem.Members.Split(',').Length)
+    Assert.Equal(2, gem.Members.Split(',').Length)
     Assert.Equal(3, cgpt.Members.Split(',').Length)
     Assert.True(gem.RemainingPercent > 90.0, "Gemini 5h should be >90% remaining")
     Assert.Equal(0.0, cgpt.RemainingPercent)

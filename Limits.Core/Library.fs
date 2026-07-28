@@ -531,6 +531,16 @@ module AntigravityUsageParser =
                     Timeframe = timeframe
                 }
 
+    let canonicalModelName (modelId: string) : string =
+        let m = (if String.IsNullOrEmpty modelId then "" else modelId).ToLowerInvariant()
+        if m.Contains("flash-lite") || m.Contains("flash_lite") || m.Contains("flashlite") then "Gemini Flash-Lite"
+        elif m.Contains("flash") then "Gemini Flash"
+        elif m.Contains("pro") || m.Contains("gemini") then "Gemini Pro"
+        elif m.Contains("sonnet") then "Claude Sonnet"
+        elif m.Contains("opus") then "Claude Opus"
+        elif m.Contains("gpt") then "GPT"
+        else modelId
+
     /// Parses the full retrieveUserQuota response into a list of grouped
     /// buckets. Drops placeholder models and entries with no modelId.
     /// Groups by (family, timeframe, resetTime) - the API's resetTime field is the
@@ -567,7 +577,7 @@ module AntigravityUsageParser =
                 let remainingPct = Math.Clamp(remaining * 100.0, 0.0, 100.0)
                 let memberIds =
                     entries
-                    |> List.map (fun e -> e.ModelId)
+                    |> List.map (fun e -> canonicalModelName e.ModelId)
                     |> List.distinct
                     |> List.sort
                     |> String.concat ", "
