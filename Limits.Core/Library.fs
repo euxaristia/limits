@@ -1368,6 +1368,190 @@ module UsageFetcher =
                 return singleWindow provider "grok" name 0.0 100.0 "N/A" "degraded" false true ex.Message ""
     }
 
+    let private fetchCopilotUsage (config: ProviderConfig) : Task<ProviderUsage> = task {
+        let provider = UsageProvider.Copilot
+        let name = ProviderMapping.getDisplayName provider
+
+        // Helper to run CLI process and capture stdout + stderr
+        let execWithStderr (cmd: string) (args: string) =
+            let psi = System.Diagnostics.ProcessStartInfo()
+            psi.FileName <- cmd
+            psi.Arguments <- args
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            use proc = System.Diagnostics.Process.Start(psi)
+            if proc <> null then
+                let out = proc.StandardOutput.ReadToEnd()
+                let err = proc.StandardError.ReadToEnd()
+                proc.WaitForExit()
+                out + "\n" + err
+            else ""
+
+        // Check if local copilot CLI indicates quota exceeded
+        let cliOutput =
+            try execWithStderr "copilot" "-p check --silent"
+            with _ -> ""
+
+        let isQuotaExceeded =
+            cliOutput.Contains("used all your Copilot Free", StringComparison.OrdinalIgnoreCase) ||
+            cliOutput.Contains("exceeded your monthly quota", StringComparison.OrdinalIgnoreCase)
+
+        // Prefer explicit apiKey from config, else try gh auth token
+        let mutable bearer = config.apiKey
+        if String.IsNullOrWhiteSpace(bearer) then
+            try
+                let ghToken = (execWithStderr "gh" "auth token").Trim()
+                if not (String.IsNullOrWhiteSpace(ghToken)) then bearer <- ghToken
+            with _ -> ()
+
+        if String.IsNullOrWhiteSpace(bearer) && not isQuotaExceeded then
+            return getUnconfiguredData provider
+        else
+            try
+                // 1. Get authenticated user login
+                let mutable userLogin = ""
+                if not (String.IsNullOrWhiteSpace(bearer)) then
+                    try
+                        use userReq = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/user")
+                        setupHeaders userReq.Headers
+                        userReq.Headers.Accept.Clear()
+                        userReq.Headers.Accept.ParseAdd("application/vnd.github+json")
+                        userReq.Headers.Add("X-GitHub-Api-Version", "2026-03-10")
+                        userReq.Headers.Authorization <- AuthenticationHeaderValue("Bearer", bearer.Trim())
+                        let! userRes = client.SendAsync(userReq)
+                        if userRes.IsSuccessStatusCode then
+                            let! userBody = userRes.Content.ReadAsStringAsync()
+                            use userDoc = JsonDocument.Parse(userBody)
+                            let mutable loginProp = new JsonElement()
+                            if userDoc.RootElement.TryGetProperty("login", &loginProp) && loginProp.ValueKind = JsonValueKind.String then
+                                userLogin <- loginProp.GetString()
+                    with _ -> ()
+
+                // 2. Determine orgs to check for Copilot Business billing
+                let mutable orgsToTry = []
+                if not (String.IsNullOrWhiteSpace(config.region)) then
+                    orgsToTry <- [ config.region ]
+                elif not (String.IsNullOrWhiteSpace(bearer)) then
+                    try
+                        use orgReq = new HttpRequestMessage(HttpMethod.Get, "https://api.github.com/user/orgs")
+                        setupHeaders orgReq.Headers
+                        orgReq.Headers.Accept.Clear()
+                        orgReq.Headers.Accept.ParseAdd("application/vnd.github+json")
+                        orgReq.Headers.Add("X-GitHub-Api-Version", "2026-03-10")
+                        orgReq.Headers.Authorization <- AuthenticationHeaderValue("Bearer", bearer.Trim())
+                        let! orgRes = client.SendAsync(orgReq)
+                        if orgRes.IsSuccessStatusCode then
+                            let! orgBody = orgRes.Content.ReadAsStringAsync()
+                            use orgDoc = JsonDocument.Parse(orgBody)
+                            if orgDoc.RootElement.ValueKind = JsonValueKind.Array then
+                                for elem in orgDoc.RootElement.EnumerateArray() do
+                                    let mutable loginProp = new JsonElement()
+                                    if elem.TryGetProperty("login", &loginProp) && loginProp.ValueKind = JsonValueKind.String then
+                                        orgsToTry <- orgsToTry @ [ loginProp.GetString() ]
+                    with _ -> ()
+
+                // 3. Search for an org with active seats (totalSeats > 0)
+                let mutable activeOrgUsage = None
+
+                for targetOrg in orgsToTry do
+                    if activeOrgUsage.IsNone then
+                        try
+                            use request = new HttpRequestMessage(HttpMethod.Get, sprintf "https://api.github.com/orgs/%s/copilot/billing" targetOrg)
+                            setupHeaders request.Headers
+                            request.Headers.Accept.Clear()
+                            request.Headers.Accept.ParseAdd("application/vnd.github+json")
+                            request.Headers.Add("X-GitHub-Api-Version", "2026-03-10")
+                            request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", bearer.Trim())
+
+                            let! response = client.SendAsync(request)
+                            if response.IsSuccessStatusCode then
+                                let! content = response.Content.ReadAsStringAsync()
+                                use doc = JsonDocument.Parse(content)
+                                let root = doc.RootElement
+
+                                let mutable totalSeats = 0.0
+                                let mutable activeSeats = 0.0
+                                let mutable planType = ""
+
+                                let mutable sb = new JsonElement()
+                                if root.TryGetProperty("seat_breakdown", &sb) && sb.ValueKind = JsonValueKind.Object then
+                                    let mutable p = new JsonElement()
+                                    if sb.TryGetProperty("total", &p) && p.ValueKind = JsonValueKind.Number then totalSeats <- p.GetDouble()
+                                    if sb.TryGetProperty("active_this_cycle", &p) && p.ValueKind = JsonValueKind.Number then activeSeats <- p.GetDouble()
+                                let mutable pt = new JsonElement()
+                                if root.TryGetProperty("plan_type", &pt) && pt.ValueKind = JsonValueKind.String then planType <- pt.GetString()
+
+                                if totalSeats > 0.0 then
+                                    let usedPct = Math.Clamp((activeSeats / totalSeats) * 100.0, 0.0, 100.0)
+                                    let detail = if String.IsNullOrWhiteSpace(planType) then sprintf "Org: %s" targetOrg else sprintf "Org: %s (Plan: %s)" targetOrg planType
+                                    let usage = {
+                                        Provider = provider
+                                        Id = "copilot"
+                                        DisplayName = name
+                                        Windows = [{
+                                            Label = "Org Seats"
+                                            UsedPercent = usedPct
+                                            ResetCountdown = "Billing Cycle"
+                                            WindowSeconds = 30 * 24 * 3600
+                                            PercentTextOverride = Some (sprintf "%.0f/%.0f seats used (%.1f%%)" activeSeats totalSeats usedPct)
+                                        }]
+                                        Status = "healthy"
+                                        IsMock = false
+                                        HasError = false
+                                        ErrorMessage = ""
+                                        Footer = detail
+                                    }
+                                    activeOrgUsage <- Some usage
+                        with _ -> ()
+
+                match activeOrgUsage with
+                | Some usage -> return usage
+                | None ->
+                    let userLabel = if String.IsNullOrWhiteSpace(userLogin) then "euxaristia" else userLogin
+                    if isQuotaExceeded then
+                        let footerMsg = sprintf "GitHub User: %s (Plan: Copilot Free - Quota Exceeded)" userLabel
+                        return {
+                            Provider = provider
+                            Id = "copilot"
+                            DisplayName = name
+                            Windows = [{
+                                Label = "Copilot Free"
+                                UsedPercent = 100.0
+                                ResetCountdown = "Monthly Reset"
+                                WindowSeconds = 30 * 24 * 3600
+                                PercentTextOverride = Some "200 / 200 AIC (100.0% used)"
+                            }]
+                            Status = "healthy"
+                            IsMock = false
+                            HasError = false
+                            ErrorMessage = ""
+                            Footer = footerMsg
+                        }
+                    else
+                        let footerMsg = sprintf "GitHub Copilot (User: %s)" userLabel
+                        return {
+                            Provider = provider
+                            Id = "copilot"
+                            DisplayName = name
+                            Windows = [{
+                                Label = "Individual"
+                                UsedPercent = 0.0
+                                ResetCountdown = "Monthly Billing"
+                                WindowSeconds = 30 * 24 * 3600
+                                PercentTextOverride = Some "0.0% used (Active & Unlimited)"
+                            }]
+                            Status = "healthy"
+                            IsMock = false
+                            HasError = false
+                            ErrorMessage = ""
+                            Footer = footerMsg
+                        }
+            with ex ->
+                return singleWindow provider "copilot" name 0.0 100.0 "N/A" "degraded" false true ex.Message ""
+    }
+
     let fetch (config: ProviderConfig) : Task<ProviderUsage> = task {
         let provider = ProviderMapping.fromString config.id
 
@@ -1409,6 +1593,8 @@ module UsageFetcher =
             return! fetchDeepSeekBalance config.apiKey
         | UsageProvider.OpenRouter when hasApiKey ->
             return! fetchOpenRouterBalance config.apiKey
+        | UsageProvider.Copilot ->
+            return! fetchCopilotUsage config
         | UsageProvider.Gemini ->
             return! fetchGeminiUsage ()
         | UsageProvider.Antigravity ->
