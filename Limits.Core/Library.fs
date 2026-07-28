@@ -173,10 +173,15 @@ module ConfigStore =
                 let loaded = JsonSerializer.Deserialize<LimitsConfig>(json, options)
                 if box loaded <> null && box loaded.providers <> null then
                     let hasGrok = loaded.providers |> List.exists (fun p -> p.id.Equals("grok", StringComparison.OrdinalIgnoreCase))
+                    let hasCopilot = loaded.providers |> List.exists (fun p -> p.id.Equals("copilot", StringComparison.OrdinalIgnoreCase))
+                    let mutable updated = loaded
                     if not hasGrok then
                         let grokEntry = { id = "grok"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
-                        { loaded with providers = loaded.providers @ [grokEntry] }
-                    else loaded
+                        updated <- { updated with providers = updated.providers @ [grokEntry] }
+                    if not hasCopilot then
+                        let copilotEntry = { id = "copilot"; enabled = Nullable(true); apiKey = ""; cookieHeader = ""; region = "" }
+                        updated <- { updated with providers = updated.providers @ [copilotEntry] }
+                    updated
                 else loaded
             else
                 let defaultConfig = createDefaultConfig()
