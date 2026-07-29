@@ -562,8 +562,9 @@ module AntigravityUsageParser =
                     then descProp.GetString()
                     else ""
                 let memberList =
-                    if memberDesc.Contains(":")
-                    then memberDesc.Substring(memberDesc.IndexOf(":") + 1).Trim()
+                    if familyLabel = "Gemini" then "Gemini 3.6 Flash, Gemini 3.5 Flash, Gemini 3.1 Pro"
+                    elif familyLabel = "Claude & GPT" then "Claude Sonnet 4.6, Claude Opus 4.6, GPT-OSS 120B"
+                    elif memberDesc.Contains(":") then memberDesc.Substring(memberDesc.IndexOf(":") + 1).Trim()
                     else memberDesc
 
                 let mutable bucketsProp = new JsonElement()
@@ -597,17 +598,11 @@ module AntigravityUsageParser =
                                 elif windowStr.Equals("5h", StringComparison.OrdinalIgnoreCase) then "Session"
                                 else deriveTimeframe resetRaw reset
 
-                            let memberCount =
-                                if String.IsNullOrWhiteSpace memberList then 1
-                                elif memberList.Contains(",") then (memberList.Split ',').Length
-                                else 1
-                            let formattedMembers = sprintf "%d model%s" memberCount (if memberCount = 1 then "" else "s")
-
                             let used = Math.Clamp((1.0 - remaining) * 100.0, 0.0, 100.0)
                             let remainingPct = Math.Clamp(remaining * 100.0, 0.0, 100.0)
                             result <- {
                                 GroupLabel = familyLabel
-                                Members = formattedMembers
+                                Members = memberList
                                 UsedPercent = used
                                 RemainingPercent = remainingPct
                                 ResetCountdown = reset
@@ -1189,7 +1184,11 @@ module UsageFetcher =
                                 then sprintf "%.1f%% remaining" b.RemainingPercent
                                 else sprintf "%d%% remaining" (int (b.RemainingPercent + 0.5))
                             (label, b.UsedPercent, b.ResetCountdown, 0, Some remainingText))
-                    let modelCount = buckets |> List.sumBy (fun b -> (b.Members.Split ',').Length)
+                    let modelCount =
+                        buckets
+                        |> List.collect (fun b -> b.Members.Split ',' |> Array.map (fun s -> s.Trim()) |> Array.toList)
+                        |> List.distinct
+                        |> List.length
                     let accountLabel =
                         if not (String.IsNullOrEmpty token.Email) then
                             sprintf "%s, %s" token.Email token.AuthMethod
