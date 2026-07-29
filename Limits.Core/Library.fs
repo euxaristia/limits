@@ -902,8 +902,12 @@ module ClaudeUsageParser =
     let private empty = { HasData = false; Used = 0.0; ResetCountdown = "Never Resets" }
 
     let private normalizeUtilization (raw: float) : float =
-        // API may return either a fraction (0..1) or a percentage (0..100+).
-        if raw > 0.0 && raw <= 1.0 then raw * 100.0 else raw
+        // The /api/oauth/usage endpoint always returns utilization already
+        // scaled 0..100 (confirmed against the sibling `percent` field in
+        // the same response). A prior version of this guessed fraction-vs-
+        // percent by checking raw <= 1.0, which silently reported 100%
+        // whenever real usage was at or below 1%.
+        raw
 
     let private readBucket (parent: JsonElement) (name: string) (defaultWindowLabel: string) (defaultWindow: TimeSpan) : Bucket =
         let mutable prop = new JsonElement()

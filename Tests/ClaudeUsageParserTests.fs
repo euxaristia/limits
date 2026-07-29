@@ -15,7 +15,7 @@ let private bucket (util: float) (reset: string) = sprintf """{"utilization": %M
 let ``Both buckets present: session higher than weekly, session wins as primary`` () =
     let futureReset = DateTime.UtcNow.AddHours(4.0).ToString("o")
     let laterReset = DateTime.UtcNow.AddDays(5.0).ToString("o")
-    let json = sprintf """{ "five_hour": %s, "seven_day": %s }""" (bucket 0.45 futureReset) (bucket 0.20 laterReset)
+    let json = sprintf """{ "five_hour": %s, "seven_day": %s }""" (bucket 45.0 futureReset) (bucket 20.0 laterReset)
     let r = parseJson json
     Assert.Equal(45.0, r.PrimaryUsed, 1)
     Assert.Equal("5-hour session quota", r.PrimaryLabel)
@@ -26,7 +26,7 @@ let ``Both buckets present: session higher than weekly, session wins as primary`
 let ``Both buckets present: weekly higher than session, weekly wins as primary`` () =
     let futureReset = DateTime.UtcNow.AddHours(2.0).ToString("o")
     let laterReset = DateTime.UtcNow.AddDays(3.0).ToString("o")
-    let json = sprintf """{ "five_hour": %s, "seven_day": %s }""" (bucket 0.10 futureReset) (bucket 0.87 laterReset)
+    let json = sprintf """{ "five_hour": %s, "seven_day": %s }""" (bucket 10.0 futureReset) (bucket 87.0 laterReset)
     let r = parseJson json
     Assert.Equal(87.0, r.PrimaryUsed, 1)
     Assert.Equal("7-day weekly quota", r.PrimaryLabel)
@@ -37,7 +37,7 @@ let ``Both buckets present: weekly higher than session, weekly wins as primary``
 let ``Tie between buckets: weekly wins (more informative)`` () =
     let futureReset = DateTime.UtcNow.AddHours(2.0).ToString("o")
     let laterReset = DateTime.UtcNow.AddDays(3.0).ToString("o")
-    let json = sprintf """{ "five_hour": %s, "seven_day": %s }""" (bucket 0.50 futureReset) (bucket 0.50 laterReset)
+    let json = sprintf """{ "five_hour": %s, "seven_day": %s }""" (bucket 50.0 futureReset) (bucket 50.0 laterReset)
     let r = parseJson json
     Assert.Equal(50.0, r.PrimaryUsed, 1)
     Assert.Equal("7-day weekly quota", r.PrimaryLabel)
@@ -45,7 +45,7 @@ let ``Tie between buckets: weekly wins (more informative)`` () =
 [<Fact>]
 let ``Only session bucket: falls back to session primary`` () =
     let futureReset = DateTime.UtcNow.AddHours(2.0).ToString("o")
-    let json = sprintf """{ "five_hour": %s }""" (bucket 0.33 futureReset)
+    let json = sprintf """{ "five_hour": %s }""" (bucket 33.0 futureReset)
     let r = parseJson json
     Assert.Equal(33.0, r.PrimaryUsed, 1)
     Assert.Equal("5-hour session quota", r.PrimaryLabel)
@@ -54,7 +54,7 @@ let ``Only session bucket: falls back to session primary`` () =
 [<Fact>]
 let ``Only weekly bucket: falls back to weekly primary`` () =
     let laterReset = DateTime.UtcNow.AddDays(3.0).ToString("o")
-    let json = sprintf """{ "seven_day": %s }""" (bucket 0.66 laterReset)
+    let json = sprintf """{ "seven_day": %s }""" (bucket 66.0 laterReset)
     let r = parseJson json
     Assert.Equal(66.0, r.PrimaryUsed, 1)
     Assert.Equal("7-day weekly quota", r.PrimaryLabel)
@@ -69,7 +69,7 @@ let ``No buckets present: returns safe defaults`` () =
 
 [<Fact>]
 let ``Null bucket value is treated as missing`` () =
-    let json = """{ "five_hour": null, "seven_day": { "utilization": 0.40, "resets_at": "2030-01-01T00:00:00Z" } }"""
+    let json = """{ "five_hour": null, "seven_day": { "utilization": 40.0, "resets_at": "2030-01-01T00:00:00Z" } }"""
     let r = parseJson json
     Assert.Equal(40.0, r.PrimaryUsed, 1)
     Assert.Equal("7-day weekly quota", r.PrimaryLabel)
@@ -89,6 +89,17 @@ let ``Utilization value of 0 is treated as already-percent (boundary)`` () =
     Assert.Equal(0.0, r.PrimaryUsed)
 
 [<Fact>]
+let ``Utilization at or below 1.0 is NOT rescaled to 100`` () =
+    // Regression test: the API always reports utilization already on a
+    // 0..100 scale. A prior heuristic misread any value <= 1.0 as a
+    // fraction and inflated it to 100%, which made lightly-used Claude
+    // Pro accounts appear fully exhausted.
+    let futureReset = DateTime.UtcNow.AddHours(1.0).ToString("o")
+    let json = sprintf """{ "five_hour": %s }""" (bucket 1.0 futureReset)
+    let r = parseJson json
+    Assert.Equal(1.0, r.PrimaryUsed, 1)
+
+[<Fact>]
 let ``Used percent is clamped to 100`` () =
     let futureReset = DateTime.UtcNow.AddHours(1.0).ToString("o")
     let json = sprintf """{ "five_hour": %s }""" (bucket 150.0 futureReset)
@@ -104,7 +115,7 @@ let ``Missing utilization field defaults to 0`` () =
 
 [<Fact>]
 let ``Empty resets_at string falls back to nominal window length`` () =
-    let json = """{ "five_hour": { "utilization": 0.50, "resets_at": "" } }"""
+    let json = """{ "five_hour": { "utilization": 50.0, "resets_at": "" } }"""
     let r = parseJson json
     Assert.Equal(50.0, r.PrimaryUsed, 1)
     // The 5-hour window default shows "in 4h Xm" - the exact minute value
@@ -114,7 +125,7 @@ let ``Empty resets_at string falls back to nominal window length`` () =
 
 [<Fact>]
 let ``Missing resets_at field falls back to nominal window length`` () =
-    let json = """{ "five_hour": { "utilization": 0.10 } }"""
+    let json = """{ "five_hour": { "utilization": 10.0 } }"""
     let r = parseJson json
     Assert.Equal(10.0, r.PrimaryUsed, 1)
     Assert.StartsWith("in ", r.PrimaryReset)
@@ -122,7 +133,7 @@ let ``Missing resets_at field falls back to nominal window length`` () =
 
 [<Fact>]
 let ``Weekly bucket without resets_at falls back to 7d window`` () =
-    let json = """{ "seven_day": { "utilization": 0.40 } }"""
+    let json = """{ "seven_day": { "utilization": 40.0 } }"""
     let r = parseJson json
     Assert.Equal(40.0, r.PrimaryUsed, 1)
     Assert.StartsWith("in ", r.PrimaryReset)
@@ -132,7 +143,7 @@ let ``Weekly bucket without resets_at falls back to 7d window`` () =
 let ``Both buckets present: Session and Weekly fields both populated with raw values`` () =
     let futureReset = DateTime.UtcNow.AddHours(4.0).ToString("o")
     let laterReset = DateTime.UtcNow.AddDays(5.0).ToString("o")
-    let json = sprintf """{ "five_hour": %s, "seven_day": %s }""" (bucket 0.45 futureReset) (bucket 0.20 laterReset)
+    let json = sprintf """{ "five_hour": %s, "seven_day": %s }""" (bucket 45.0 futureReset) (bucket 20.0 laterReset)
     let r = parseJson json
     Assert.True(r.Session.IsSome, "Session bucket should be present")
     Assert.True(r.Weekly.IsSome, "Weekly bucket should be present")
@@ -146,7 +157,7 @@ let ``Both buckets present: Session and Weekly fields both populated with raw va
 [<Fact>]
 let ``Only session bucket: Session populated, Weekly is None`` () =
     let futureReset = DateTime.UtcNow.AddHours(2.0).ToString("o")
-    let json = sprintf """{ "five_hour": %s }""" (bucket 0.33 futureReset)
+    let json = sprintf """{ "five_hour": %s }""" (bucket 33.0 futureReset)
     let r = parseJson json
     Assert.True(r.Session.IsSome)
     Assert.True(r.Weekly.IsNone)
@@ -154,7 +165,7 @@ let ``Only session bucket: Session populated, Weekly is None`` () =
 [<Fact>]
 let ``Only weekly bucket: Weekly populated, Session is None`` () =
     let laterReset = DateTime.UtcNow.AddDays(3.0).ToString("o")
-    let json = sprintf """{ "seven_day": %s }""" (bucket 0.66 laterReset)
+    let json = sprintf """{ "seven_day": %s }""" (bucket 66.0 laterReset)
     let r = parseJson json
     Assert.True(r.Session.IsNone)
     Assert.True(r.Weekly.IsSome)
