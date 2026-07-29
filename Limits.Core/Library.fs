@@ -1538,6 +1538,13 @@ module UsageFetcher =
                     with _ -> ()
 
                 // 3. Search for an org with active seats (totalSeats > 0)
+                let monthlyResetCountdown () =
+                    let now = DateTime.UtcNow
+                    let nextMonth =
+                        if now.Month = 12 then DateTime(now.Year + 1, 1, 1, 0, 0, 0, DateTimeKind.Utc)
+                        else DateTime(now.Year, now.Month + 1, 1, 0, 0, 0, DateTimeKind.Utc)
+                    DateParser.formatCountdown (nextMonth.ToString("o"))
+
                 let mutable activeOrgUsage = None
 
                 for targetOrg in orgsToTry do
@@ -1578,7 +1585,7 @@ module UsageFetcher =
                                         Windows = [{
                                             Label = "Org Seats"
                                             UsedPercent = usedPct
-                                            ResetCountdown = "Billing Cycle"
+                                            ResetCountdown = monthlyResetCountdown ()
                                             WindowSeconds = 30 * 24 * 3600
                                             PercentTextOverride = Some (sprintf "%.0f/%.0f seats used (%.1f%%)" activeSeats totalSeats usedPct)
                                         }]
@@ -1604,7 +1611,7 @@ module UsageFetcher =
                             Windows = [{
                                 Label = "Copilot Free"
                                 UsedPercent = 100.0
-                                ResetCountdown = "Monthly Reset"
+                                ResetCountdown = monthlyResetCountdown ()
                                 WindowSeconds = 30 * 24 * 3600
                                 PercentTextOverride = Some "200 / 200 AIC (100.0% used)"
                             }]
@@ -1623,7 +1630,7 @@ module UsageFetcher =
                             Windows = [{
                                 Label = "Individual"
                                 UsedPercent = 0.0
-                                ResetCountdown = "Monthly Billing"
+                                ResetCountdown = monthlyResetCountdown ()
                                 WindowSeconds = 30 * 24 * 3600
                                 PercentTextOverride = Some "0.0% used (Active & Unlimited)"
                             }]
