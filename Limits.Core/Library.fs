@@ -1701,15 +1701,6 @@ module UsageFetcher =
                 out + "\n" + err
             else ""
 
-        // Check if local copilot CLI indicates quota exceeded
-        let cliOutput =
-            try execWithStderr "copilot" "-p check --silent"
-            with _ -> ""
-
-        let isQuotaExceeded =
-            cliOutput.Contains("used all your Copilot Free", StringComparison.OrdinalIgnoreCase) ||
-            cliOutput.Contains("exceeded your monthly quota", StringComparison.OrdinalIgnoreCase)
-
         // Prefer explicit apiKey from config, else try gh auth token
         let mutable bearer = config.apiKey
         if String.IsNullOrWhiteSpace(bearer) then
@@ -1718,7 +1709,7 @@ module UsageFetcher =
                 if not (String.IsNullOrWhiteSpace(ghToken)) then bearer <- ghToken
             with _ -> ()
 
-        if String.IsNullOrWhiteSpace(bearer) && not isQuotaExceeded then
+        if String.IsNullOrWhiteSpace(bearer) then
             return getUnconfiguredData provider
         else
             try
@@ -1829,44 +1820,24 @@ module UsageFetcher =
                 | Some usage -> return usage
                 | None ->
                     let userLabel = if String.IsNullOrWhiteSpace(userLogin) then "euxaristia" else userLogin
-                    if isQuotaExceeded then
-                        let footerMsg = sprintf "GitHub User: %s (Plan: Copilot Free - Quota Exceeded)" userLabel
-                        return {
-                            Provider = provider
-                            Id = "copilot"
-                            DisplayName = name
-                            Windows = [{
-                                Label = "Copilot Free"
-                                UsedPercent = 100.0
-                                ResetCountdown = monthlyResetCountdown ()
-                                WindowSeconds = 30 * 24 * 3600
-                                PercentTextOverride = Some "200 / 200 AIC (100.0% used)"
-                            }]
-                            Status = "healthy"
-                            IsMock = false
-                            HasError = false
-                            ErrorMessage = ""
-                            Footer = footerMsg
-                        }
-                    else
-                        let footerMsg = sprintf "GitHub Copilot (User: %s)" userLabel
-                        return {
-                            Provider = provider
-                            Id = "copilot"
-                            DisplayName = name
-                            Windows = [{
-                                Label = "Individual"
-                                UsedPercent = 0.0
-                                ResetCountdown = monthlyResetCountdown ()
-                                WindowSeconds = 30 * 24 * 3600
-                                PercentTextOverride = Some "0.0% used (Active & Unlimited)"
-                            }]
-                            Status = "healthy"
-                            IsMock = false
-                            HasError = false
-                            ErrorMessage = ""
-                            Footer = footerMsg
-                        }
+                    let footerMsg = sprintf "GitHub Copilot (User: %s)" userLabel
+                    return {
+                        Provider = provider
+                        Id = "copilot"
+                        DisplayName = name
+                        Windows = [{
+                            Label = "Individual"
+                            UsedPercent = 0.0
+                            ResetCountdown = monthlyResetCountdown ()
+                            WindowSeconds = 30 * 24 * 3600
+                            PercentTextOverride = Some "0.0% used (Active & Unlimited)"
+                        }]
+                        Status = "healthy"
+                        IsMock = false
+                        HasError = false
+                        ErrorMessage = ""
+                        Footer = footerMsg
+                    }
             with ex ->
                 return singleWindow provider "copilot" name 0.0 100.0 "N/A" "degraded" false true ex.Message ""
     }
