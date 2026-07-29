@@ -539,61 +539,136 @@ module AntigravityUsageParser =
         elif m.Contains("gpt") then "GPT"
         else modelId
 
-    /// Parses the full retrieveUserQuota response into a list of grouped
-    /// buckets. Drops placeholder models and entries with no modelId.
-    /// Groups by (family, timeframe, resetTime) - the API's resetTime field is the
-    /// authoritative window length (5h vs weekly).
+    /// Parses retrieveUserQuotaSummary response (or retrieveUserQuota fallback) into a list of grouped
+    /// buckets.
     let parse (root: JsonElement) : Bucket list =
-        let mutable bucketsProp = new JsonElement()
-        if not (root.TryGetProperty("buckets", &bucketsProp)) || bucketsProp.ValueKind <> JsonValueKind.Array then
-            []
-        else
-            let raws =
-                bucketsProp.EnumerateArray()
-                |> Seq.choose parseBucket
-                |> Seq.toList
-            // Group by (family, timeframe, resetCountdown)
-            let groups = System.Collections.Generic.Dictionary<string, RawBucket list>()
-            for entry in raws do
-                let k = entry.Family + "|" + entry.Timeframe + "|" + entry.ResetCountdown
-                if groups.ContainsKey k then
-                    let mutable existing : RawBucket list = Unchecked.defaultof<_>
-                    if groups.TryGetValue(k, &existing) then
-                        groups.[k] <- entry :: existing
-                else
-                    groups.[k] <- [entry]
-            // Project each group to a Bucket
-            let mutable result : Bucket list = []
-            for kv in groups do
-                let entries = kv.Value
-                let first = List.head entries
-                let remaining =
-                    entries
-                    |> List.map (fun e -> e.RemainingFraction)
-                    |> List.min
-                let used = Math.Clamp((1.0 - remaining) * 100.0, 0.0, 100.0)
-                let remainingPct = Math.Clamp(remaining * 100.0, 0.0, 100.0)
-                let memberIds =
-                    entries
-                    |> List.map (fun e -> canonicalModelName e.ModelId)
-                    |> List.distinct
-                    |> List.sort
-                    |> String.concat ", "
-                result <- {
-                    GroupLabel = first.Family
-                    Members = memberIds
-                    UsedPercent = used
-                    RemainingPercent = remainingPct
-                    ResetCountdown = first.ResetCountdown
-                    Timeframe = first.Timeframe
-                } :: result
+        let mutable groupsProp = new JsonElement()
+        if root.TryGetProperty("groups", &groupsProp) && groupsProp.ValueKind = JsonValueKind.Array then
+            let mutable result = []
+            for group in groupsProp.EnumerateArray() do
+                let mutable nameProp = new JsonElement()
+                let mutable descProp = new JsonElement()
+                let groupName =
+                    if group.TryGetProperty("displayName", &nameProp) && nameProp.ValueKind = JsonValueKind.String
+                    then nameProp.GetString()
+                    else ""
+                let familyLabel =
+                    if groupName.StartsWith("Gemini", StringComparison.OrdinalIgnoreCase) then "Gemini"
+                    elif groupName.Contains("Claude", StringComparison.OrdinalIgnoreCase) || groupName.Contains("GPT", StringComparison.OrdinalIgnoreCase) then "Claude & GPT"
+                    else "Antigravity"
+                
+                let memberDesc =
+                    if group.TryGetProperty("description", &descProp) && descProp.ValueKind = JsonValueKind.String
+                    then descProp.GetString()
+                    else ""
+                let memberList =
+                    if memberDesc.Contains(":")
+                    then memberDesc.Substring(memberDesc.IndexOf(":") + 1).Trim()
+                    else memberDesc
+
+                let mutable bucketsProp = new JsonElement()
+                if group.TryGetProperty("buckets", &bucketsProp) && bucketsProp.ValueKind = JsonValueKind.Array then
+                    for bucket in bucketsProp.EnumerateArray() do
+                        let mutable disProp = new JsonElement()
+                        let isDisabled =
+                            bucket.TryGetProperty("disabled", &disProp) && disProp.ValueKind = JsonValueKind.True
+                        if not isDisabled then
+                            let mutable remProp = new JsonElement()
+                            let remaining =
+                                if bucket.TryGetProperty("remainingFraction", &remProp) && remProp.ValueKind = JsonValueKind.Number
+                                then remProp.GetDouble()
+                                else 0.0
+                            let mutable resetProp = new JsonElement()
+                            let resetRaw =
+                                if bucket.TryGetProperty("resetTime", &resetProp) && resetProp.ValueKind = JsonValueKind.String
+                                then resetProp.GetString()
+                                else ""
+                            let reset =
+                                if not (String.IsNullOrEmpty resetRaw)
+                                then DateParser.formatCountdown resetRaw
+                                else "Never Resets"
+                            let mutable winProp = new JsonElement()
+                            let windowStr =
+                                if bucket.TryGetProperty("window", &winProp) && winProp.ValueKind = JsonValueKind.String
+                                then winProp.GetString()
+                                else ""
+                            let timeframe =
+                                if windowStr.Equals("weekly", StringComparison.OrdinalIgnoreCase) then "Weekly"
+                                elif windowStr.Equals("5h", StringComparison.OrdinalIgnoreCase) then "Session"
+                                else deriveTimeframe resetRaw reset
+
+                            let memberCount =
+                                if String.IsNullOrWhiteSpace memberList then 1
+                                elif memberList.Contains(",") then (memberList.Split ',').Length
+                                else 1
+                            let formattedMembers = sprintf "%d model%s" memberCount (if memberCount = 1 then "" else "s")
+
+                            let used = Math.Clamp((1.0 - remaining) * 100.0, 0.0, 100.0)
+                            let remainingPct = Math.Clamp(remaining * 100.0, 0.0, 100.0)
+                            result <- {
+                                GroupLabel = familyLabel
+                                Members = formattedMembers
+                                UsedPercent = used
+                                RemainingPercent = remainingPct
+                                ResetCountdown = reset
+                                Timeframe = timeframe
+                            } :: result
             let familyRank (label: string) =
                 if label.Equals("Gemini", StringComparison.OrdinalIgnoreCase) then 0
                 elif label.StartsWith("Claude", StringComparison.OrdinalIgnoreCase) then 1
                 else 2
 
             result
-            |> List.sortBy (fun b -> familyRank b.GroupLabel, b.ResetCountdown)
+            |> List.sortBy (fun b -> familyRank b.GroupLabel, (if b.Timeframe = "Weekly" then 0 else 1), b.ResetCountdown)
+        else
+            let mutable bucketsProp = new JsonElement()
+            if not (root.TryGetProperty("buckets", &bucketsProp)) || bucketsProp.ValueKind <> JsonValueKind.Array then
+                []
+            else
+                let raws =
+                    bucketsProp.EnumerateArray()
+                    |> Seq.choose parseBucket
+                    |> Seq.toList
+                let groups = System.Collections.Generic.Dictionary<string, RawBucket list>()
+                for entry in raws do
+                    let k = entry.Family + "|" + entry.Timeframe + "|" + entry.ResetCountdown
+                    if groups.ContainsKey k then
+                        let mutable existing : RawBucket list = Unchecked.defaultof<_>
+                        if groups.TryGetValue(k, &existing) then
+                            groups.[k] <- entry :: existing
+                    else
+                        groups.[k] <- [entry]
+                let mutable result : Bucket list = []
+                for kv in groups do
+                    let entries = kv.Value
+                    let first = List.head entries
+                    let remaining =
+                        entries
+                        |> List.map (fun e -> e.RemainingFraction)
+                        |> List.min
+                    let used = Math.Clamp((1.0 - remaining) * 100.0, 0.0, 100.0)
+                    let remainingPct = Math.Clamp(remaining * 100.0, 0.0, 100.0)
+                    let memberIds =
+                        entries
+                        |> List.map (fun e -> canonicalModelName e.ModelId)
+                        |> List.distinct
+                        |> List.sort
+                        |> String.concat ", "
+                    result <- {
+                        GroupLabel = first.Family
+                        Members = memberIds
+                        UsedPercent = used
+                        RemainingPercent = remainingPct
+                        ResetCountdown = first.ResetCountdown
+                        Timeframe = first.Timeframe
+                    } :: result
+                let familyRank (label: string) =
+                    if label.Equals("Gemini", StringComparison.OrdinalIgnoreCase) then 0
+                    elif label.StartsWith("Claude", StringComparison.OrdinalIgnoreCase) then 1
+                    else 2
+
+                result
+                |> List.sortBy (fun b -> familyRank b.GroupLabel, b.ResetCountdown)
 
 module ClaudeUsageParser =
     // Claude /usage returns two sibling buckets: a rolling 5-hour session
@@ -1061,22 +1136,25 @@ module UsageFetcher =
         try
             let token = AntigravityCredentials.load ()
 
-            use request = new HttpRequestMessage(HttpMethod.Post, "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota")
-            setupHeaders request.Headers
-            // The Swift reference uses User-Agent: antigravity for these calls.
-            // setupHeaders already set a Chrome User-Agent; replace it (not
-            // append - duplicate User-Agent headers cause some clouds to 400).
-            request.Headers.UserAgent.Clear()
-            request.Headers.UserAgent.ParseAdd("antigravity")
-            request.Headers.Authorization <- AuthenticationHeaderValue("Bearer", token.AccessToken)
-            // Empty body - the Swift code includes {"project": <id>} when
-            // known, but for consumer accounts (the common case) empty works
-            // and loadCodeAssist is not needed.
-            request.Content <- new StringContent("{}", System.Text.Encoding.UTF8, "application/json")
+            let callQuotaEndpoint (endpointUrl: string) = task {
+                use req = new HttpRequestMessage(HttpMethod.Post, endpointUrl)
+                setupHeaders req.Headers
+                req.Headers.UserAgent.Clear()
+                req.Headers.UserAgent.ParseAdd("antigravity")
+                req.Headers.Authorization <- AuthenticationHeaderValue("Bearer", token.AccessToken)
+                req.Content <- new StringContent("{}", System.Text.Encoding.UTF8, "application/json")
+                return! client.SendAsync(req)
+            }
 
-            let! response = client.SendAsync(request)
-            if response.IsSuccessStatusCode then
-                let! content = response.Content.ReadAsStringAsync()
+            let! response = callQuotaEndpoint "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+            let! finalResponse =
+                task {
+                    if response.IsSuccessStatusCode then return response
+                    else return! callQuotaEndpoint "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+                }
+
+            if finalResponse.IsSuccessStatusCode then
+                let! content = finalResponse.Content.ReadAsStringAsync()
                 use doc = JsonDocument.Parse(content)
                 let buckets = AntigravityUsageParser.parse doc.RootElement
 
