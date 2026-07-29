@@ -1012,6 +1012,36 @@ module EmailRedactor =
                 sprintf "%s@%s" redactedLocal domain
             )
 
+module CopilotQuotaCache =
+    type CacheEntry = { isQuotaExceeded: bool; checkedAtUtc: string }
+
+    let private ttl = TimeSpan.FromMinutes(20.0)
+
+    let private cachePath () =
+        let dir = Path.GetDirectoryName(ConfigStore.getDefaultConfigPath())
+        Path.Combine(dir, "copilot-quota-cache.json")
+
+    /// Returns the cached quota-exceeded flag if it was checked within the TTL, else None.
+    let tryLoad () : bool option =
+        try
+            let path = cachePath()
+            if File.Exists(path) then
+                let entry = JsonSerializer.Deserialize<CacheEntry>(File.ReadAllText(path))
+                match DateTime.TryParse(entry.checkedAtUtc) with
+                | true, checkedAt when DateTime.UtcNow - checkedAt.ToUniversalTime() < ttl -> Some entry.isQuotaExceeded
+                | _ -> None
+            else None
+        with _ -> None
+
+    let save (isQuotaExceeded: bool) =
+        try
+            let path = cachePath()
+            let dir = Path.GetDirectoryName(path)
+            if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
+            let entry = { isQuotaExceeded = isQuotaExceeded; checkedAtUtc = DateTime.UtcNow.ToString("o") }
+            File.WriteAllText(path, JsonSerializer.Serialize(entry))
+        with _ -> ()
+
 module UsageFetcher =
     let private client = new HttpClient()
 
@@ -1709,7 +1739,45 @@ module UsageFetcher =
                 if not (String.IsNullOrWhiteSpace(ghToken)) then bearer <- ghToken
             with _ -> ()
 
-        if String.IsNullOrWhiteSpace(bearer) then
+        // Copilot Free quota-exceeded state isn't exposed by the GitHub REST API, only by
+        // the `copilot` CLI's own check, which is a real model round-trip (~10s). Cache the
+        // result so that cost is only paid once per TTL window instead of every invocation.
+        let! isQuotaExceeded = task {
+            match CopilotQuotaCache.tryLoad() with
+            | Some cached -> return cached
+            | None ->
+                try
+                    let psi = System.Diagnostics.ProcessStartInfo()
+                    psi.FileName <- "copilot"
+                    psi.Arguments <- "-p check --silent"
+                    psi.RedirectStandardOutput <- true
+                    psi.RedirectStandardError <- true
+                    psi.UseShellExecute <- false
+                    psi.CreateNoWindow <- true
+                    use proc = System.Diagnostics.Process.Start(psi)
+                    if proc = null then return false
+                    else
+                        let outTask = proc.StandardOutput.ReadToEndAsync()
+                        let errTask = proc.StandardError.ReadToEndAsync()
+                        let waitTask = proc.WaitForExitAsync()
+                        let timeoutTask = Task.Delay(TimeSpan.FromSeconds(20.0))
+                        let! completed = Task.WhenAny(waitTask, timeoutTask)
+                        if completed <> waitTask then
+                            try proc.Kill() with _ -> ()
+                            return false
+                        else
+                            let! out = outTask
+                            let! err = errTask
+                            let combined = out + "\n" + err
+                            let result =
+                                combined.Contains("used all your Copilot Free", StringComparison.OrdinalIgnoreCase) ||
+                                combined.Contains("exceeded your monthly quota", StringComparison.OrdinalIgnoreCase)
+                            CopilotQuotaCache.save(result)
+                            return result
+                with _ -> return false
+        }
+
+        if String.IsNullOrWhiteSpace(bearer) && not isQuotaExceeded then
             return getUnconfiguredData provider
         else
             try
@@ -1820,24 +1888,44 @@ module UsageFetcher =
                 | Some usage -> return usage
                 | None ->
                     let userLabel = if String.IsNullOrWhiteSpace(userLogin) then "euxaristia" else userLogin
-                    let footerMsg = sprintf "GitHub Copilot (User: %s)" userLabel
-                    return {
-                        Provider = provider
-                        Id = "copilot"
-                        DisplayName = name
-                        Windows = [{
-                            Label = "Individual"
-                            UsedPercent = 0.0
-                            ResetCountdown = monthlyResetCountdown ()
-                            WindowSeconds = 30 * 24 * 3600
-                            PercentTextOverride = Some "0.0% used (Active & Unlimited)"
-                        }]
-                        Status = "healthy"
-                        IsMock = false
-                        HasError = false
-                        ErrorMessage = ""
-                        Footer = footerMsg
-                    }
+                    if isQuotaExceeded then
+                        let footerMsg = sprintf "GitHub User: %s (Plan: Copilot Free - Quota Exceeded)" userLabel
+                        return {
+                            Provider = provider
+                            Id = "copilot"
+                            DisplayName = name
+                            Windows = [{
+                                Label = "Copilot Free"
+                                UsedPercent = 100.0
+                                ResetCountdown = monthlyResetCountdown ()
+                                WindowSeconds = 30 * 24 * 3600
+                                PercentTextOverride = Some "200 / 200 AIC (100.0% used)"
+                            }]
+                            Status = "healthy"
+                            IsMock = false
+                            HasError = false
+                            ErrorMessage = ""
+                            Footer = footerMsg
+                        }
+                    else
+                        let footerMsg = sprintf "GitHub Copilot (User: %s)" userLabel
+                        return {
+                            Provider = provider
+                            Id = "copilot"
+                            DisplayName = name
+                            Windows = [{
+                                Label = "Individual"
+                                UsedPercent = 0.0
+                                ResetCountdown = monthlyResetCountdown ()
+                                WindowSeconds = 30 * 24 * 3600
+                                PercentTextOverride = Some "0.0% used (Active & Unlimited)"
+                            }]
+                            Status = "healthy"
+                            IsMock = false
+                            HasError = false
+                            ErrorMessage = ""
+                            Footer = footerMsg
+                        }
             with ex ->
                 return singleWindow provider "copilot" name 0.0 100.0 "N/A" "degraded" false true ex.Message ""
     }
