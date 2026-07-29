@@ -348,6 +348,16 @@ module AntigravityCredentials =
             | None ->
                 raise (AntigravityCredentialsError("No Antigravity credential found on macOS/Linux. Sign in via `agy` CLI."))
 
+    let isWorking () : bool =
+        try
+            let t = load ()
+            if String.IsNullOrWhiteSpace(t.AccessToken) then false
+            else
+                match t.Expiry with
+                | Some exp -> exp.ToUniversalTime() > DateTime.UtcNow.AddSeconds(30.0)
+                | None -> true
+        with _ -> false
+
 module GrokCredentials =
     type Token = {
         AccessToken: string
@@ -379,11 +389,17 @@ module GrokCredentials =
                                 if entry.TryGetProperty("auth_mode", &p) && p.ValueKind = JsonValueKind.String then p.GetString() else "oidc"
                             let expiresAt =
                                 let mutable p = new JsonElement()
-                                if entry.TryGetProperty("expires_at", &p) && p.ValueKind = JsonValueKind.String then
-                                    let s = p.GetString()
-                                    match DateTime.TryParse(s) with
-                                    | true, d -> Some d
-                                    | _ -> None
+                                if entry.TryGetProperty("expires_at", &p) then
+                                    if p.ValueKind = JsonValueKind.String then
+                                        let s = p.GetString()
+                                        match DateTime.TryParse(s) with
+                                        | true, d -> Some d
+                                        | _ -> None
+                                    elif p.ValueKind = JsonValueKind.Number then
+                                        let unixVal = p.GetInt64()
+                                        let dt = if unixVal > 100000000000L then DateTimeOffset.FromUnixTimeMilliseconds(unixVal).UtcDateTime else DateTimeOffset.FromUnixTimeSeconds(unixVal).UtcDateTime
+                                        Some dt
+                                    else None
                                 else None
                             Some { AccessToken = tokenStr; Email = email; ExpiresAt = expiresAt; AuthMode = authMode }
                         else None
@@ -391,6 +407,213 @@ module GrokCredentials =
                 else None
             else None
         with _ -> None
+
+    let isWorking (tokenOpt: Token option) : bool =
+        match tokenOpt with
+        | Some t ->
+            if String.IsNullOrWhiteSpace(t.AccessToken) then false
+            else
+                match t.ExpiresAt with
+                | Some exp -> exp.ToUniversalTime() > DateTime.UtcNow.AddSeconds(30.0)
+                | None -> true
+        | None -> false
+
+module ClaudeCredentials =
+    type Token = {
+        AccessToken: string
+        ExpiresAt: DateTime option
+    }
+
+    let load () : Token option =
+        try
+            let userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            let credsPath = Path.Combine(userProfile, ".claude", ".credentials.json")
+            if File.Exists(credsPath) then
+                let json = File.ReadAllText(credsPath)
+                use doc = JsonDocument.Parse(json)
+                let root = doc.RootElement
+                let mutable oauthProp = new JsonElement()
+                let mutable tokenProp = new JsonElement()
+                if root.TryGetProperty("claudeAiOauth", &oauthProp) && oauthProp.TryGetProperty("accessToken", &tokenProp) then
+                    let token = tokenProp.GetString()
+                    let expiresAt =
+                        let mutable expProp = new JsonElement()
+                        if oauthProp.TryGetProperty("expiresAt", &expProp) || oauthProp.TryGetProperty("expires_at", &expProp) then
+                            if expProp.ValueKind = JsonValueKind.String then
+                                match DateTime.TryParse(expProp.GetString()) with
+                                | true, d -> Some d
+                                | _ -> None
+                            elif expProp.ValueKind = JsonValueKind.Number then
+                                let unixVal = expProp.GetInt64()
+                                let dt = if unixVal > 100000000000L then DateTimeOffset.FromUnixTimeMilliseconds(unixVal).UtcDateTime else DateTimeOffset.FromUnixTimeSeconds(unixVal).UtcDateTime
+                                Some dt
+                            else None
+                        else None
+                    if not (String.IsNullOrWhiteSpace(token)) then
+                        Some { AccessToken = token; ExpiresAt = expiresAt }
+                    else None
+                else None
+            else None
+        with _ -> None
+
+    let isWorking () : bool =
+        match load () with
+        | Some t ->
+            match t.ExpiresAt with
+            | Some exp -> exp.ToUniversalTime() > DateTime.UtcNow.AddSeconds(30.0)
+            | None -> true
+        | None -> false
+
+module GeminiCredentials =
+    type Token = {
+        AccessToken: string
+        ExpiresAt: DateTime option
+    }
+
+    let load () : Token option =
+        try
+            let userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            let credsPath = Path.Combine(userProfile, ".gemini", "oauth_creds.json")
+            if File.Exists(credsPath) then
+                let json = File.ReadAllText(credsPath)
+                use doc = JsonDocument.Parse(json)
+                let root = doc.RootElement
+                let mutable tokenProp = new JsonElement()
+                if root.TryGetProperty("access_token", &tokenProp) then
+                    let token = tokenProp.GetString()
+                    let expiresAt =
+                        let mutable expProp = new JsonElement()
+                        if root.TryGetProperty("expiry", &expProp) || root.TryGetProperty("expires_at", &expProp) then
+                            if expProp.ValueKind = JsonValueKind.String then
+                                match DateTime.TryParse(expProp.GetString()) with
+                                | true, d -> Some d
+                                | _ -> None
+                            elif expProp.ValueKind = JsonValueKind.Number then
+                                let unixVal = expProp.GetInt64()
+                                let dt = if unixVal > 100000000000L then DateTimeOffset.FromUnixTimeMilliseconds(unixVal).UtcDateTime else DateTimeOffset.FromUnixTimeSeconds(unixVal).UtcDateTime
+                                Some dt
+                            else None
+                        else None
+                    if not (String.IsNullOrWhiteSpace(token)) then
+                        Some { AccessToken = token; ExpiresAt = expiresAt }
+                    else None
+                else None
+            else None
+        with _ -> None
+
+    let isWorking () : bool =
+        match load () with
+        | Some t ->
+            match t.ExpiresAt with
+            | Some exp -> exp.ToUniversalTime() > DateTime.UtcNow.AddSeconds(30.0)
+            | None -> true
+        | None -> false
+
+module CliOAuthRefresher =
+
+    /// Checks if a CLI command/executable is available on the current system PATH or as an absolute path.
+    let isCliAvailable (command: string) : bool =
+        if String.IsNullOrWhiteSpace(command) then false
+        elif Path.IsPathRooted(command) then File.Exists(command)
+        else
+            let pathVar = Environment.GetEnvironmentVariable("PATH")
+            if String.IsNullOrWhiteSpace(pathVar) then false
+            else
+                let pathSeparator = if OperatingSystem.IsWindows() then ';' else ':'
+                let extensions =
+                    if OperatingSystem.IsWindows() then
+                        let pathext = Environment.GetEnvironmentVariable("PATHEXT")
+                        if String.IsNullOrWhiteSpace(pathext) then [".exe"; ".cmd"; ".bat"; ".com"]
+                        else pathext.Split(';') |> Array.toList
+                    else [""]
+                let dirs = pathVar.Split(pathSeparator, StringSplitOptions.RemoveEmptyEntries)
+                dirs |> Array.exists (fun dir ->
+                    extensions |> List.exists (fun ext ->
+                        try
+                            let fullPath = Path.Combine(dir, command + ext)
+                            File.Exists(fullPath)
+                        with _ -> false
+                    )
+                )
+
+    /// Runs a CLI process headlessly in the background without creating a window.
+    /// Returns true if execution completed with exit code 0.
+    let runCliHeadless (cliName: string) (args: string) (timeoutSeconds: float) : Task<bool> = task {
+        try
+            let psi = System.Diagnostics.ProcessStartInfo()
+            psi.FileName <- cliName
+            psi.Arguments <- args
+            psi.CreateNoWindow <- true
+            psi.UseShellExecute <- false
+            psi.WindowStyle <- System.Diagnostics.ProcessWindowStyle.Hidden
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            use proc = System.Diagnostics.Process.Start(psi)
+            if proc = null then return false
+            else
+                let timeoutTask = Task.Delay(TimeSpan.FromSeconds(timeoutSeconds))
+                let exitTask = proc.WaitForExitAsync()
+                let! completed = Task.WhenAny(exitTask, timeoutTask)
+                if completed = exitTask then
+                    return proc.ExitCode = 0
+                else
+                    try proc.Kill() with _ -> ()
+                    return false
+        with _ ->
+            return false
+    }
+
+    /// Checks if the OAuth token for a given provider is currently working (present, non-empty, and not expired).
+    let isTokenWorking (provider: UsageProvider) : bool =
+        match provider with
+        | UsageProvider.Grok ->
+            GrokCredentials.load() |> GrokCredentials.isWorking
+        | UsageProvider.Antigravity ->
+            AntigravityCredentials.isWorking()
+        | UsageProvider.Claude ->
+            ClaudeCredentials.isWorking()
+        | UsageProvider.Gemini ->
+            GeminiCredentials.isWorking()
+        | UsageProvider.Copilot ->
+            try
+                let userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+                let ghHostsPath = Path.Combine(userProfile, ".config", "gh", "hosts.yml")
+                File.Exists(ghHostsPath)
+            with _ -> false
+        | _ -> true
+
+    /// Returns candidate CLI commands and arguments for refreshing a provider's OAuth token.
+    let getMatchingCliCandidates (provider: UsageProvider) : (string * string) list =
+        match provider with
+        | UsageProvider.Grok -> [ ("grok", "--version"); ("grok", "auth status"); ("grok", "") ]
+        | UsageProvider.Antigravity -> [ ("agy", "--version"); ("antigravity", "--version") ]
+        | UsageProvider.Claude -> [ ("claude", "--version") ]
+        | UsageProvider.Gemini -> [ ("gemini", "--version"); ("gcloud", "auth print-access-token") ]
+        | UsageProvider.Copilot -> [ ("copilot", "--version"); ("gh", "auth token") ]
+        | _ -> []
+
+    /// Forcefully runs an available matching CLI tool headlessly in the background to refresh the OAuth token.
+    let forceRefreshViaCliHeadless (provider: UsageProvider) : Task<bool> = task {
+        let candidates = getMatchingCliCandidates provider
+        match candidates |> List.tryFind (fun (cli, _) -> isCliAvailable cli) with
+        | Some (cli, args) ->
+            let! _ = runCliHeadless cli args 10.0
+            return isTokenWorking provider
+        | None ->
+            return false
+    }
+
+    /// Ensures that the OAuth token for a provider is ready before querying usage.
+    /// If the token is already working (valid and not expired), NO CLI tool is run, saving CPU cycles.
+    /// If the token is missing/expired, it searches for an available CLI tool and runs it headlessly in the background.
+    let ensureTokenReady (provider: UsageProvider) : Task<bool> = task {
+        if isTokenWorking provider then
+            // Token is already working! Do NOT waste CPU cycles running CLI tool.
+            return true
+        else
+            // Token isn't working; try running an available matching CLI tool headlessly.
+            return! forceRefreshViaCliHeadless provider
+    }
 
 module DateParser =
     let formatCountdown (resetsAtStr: string) =
@@ -1659,6 +1882,7 @@ module UsageFetcher =
                 let token = if hasCookie then config.cookieHeader else config.apiKey
                 return! fetchClaudeUsage token
             else
+                let! _ = CliOAuthRefresher.ensureTokenReady UsageProvider.Claude
                 // Auto-fallback: try reading ~/.claude/.credentials.json
                 let userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
                 let credsPath = Path.Combine(userProfile, ".claude", ".credentials.json")
@@ -1686,22 +1910,34 @@ module UsageFetcher =
         | UsageProvider.OpenRouter when hasApiKey ->
             return! fetchOpenRouterBalance config.apiKey
         | UsageProvider.Copilot ->
+            let! _ = CliOAuthRefresher.ensureTokenReady UsageProvider.Copilot
             return! fetchCopilotUsage config
         | UsageProvider.Gemini ->
+            let! _ = CliOAuthRefresher.ensureTokenReady UsageProvider.Gemini
             return! fetchGeminiUsage ()
         | UsageProvider.Antigravity ->
+            let! _ = CliOAuthRefresher.ensureTokenReady UsageProvider.Antigravity
             return! fetchAntigravityUsage ()
         | UsageProvider.Grok ->
+            let fetchGrokWithRetry () = task {
+                let! _ = CliOAuthRefresher.ensureTokenReady UsageProvider.Grok
+                let grokToken = GrokCredentials.load()
+                let! res = fetchGrokUsage grokToken config.apiKey
+                if res.HasError && (res.ErrorMessage.Contains("401") || res.ErrorMessage.Contains("403")) then
+                    let! refreshed = CliOAuthRefresher.forceRefreshViaCliHeadless UsageProvider.Grok
+                    if refreshed then
+                        let updatedToken = GrokCredentials.load()
+                        return! fetchGrokUsage updatedToken config.apiKey
+                    else return res
+                else return res
+            }
             if hasCookie then
                 let! webRes = fetchGrokWebUsage config.cookieHeader
                 match webRes with
                 | Some usage -> return usage
-                | None ->
-                    let grokToken = GrokCredentials.load()
-                    return! fetchGrokUsage grokToken config.apiKey
+                | None -> return! fetchGrokWithRetry ()
             else
-                let grokToken = GrokCredentials.load()
-                return! fetchGrokUsage grokToken config.apiKey
+                return! fetchGrokWithRetry ()
         | _ ->
             return getUnconfiguredData provider
     }

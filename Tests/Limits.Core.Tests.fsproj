@@ -10,6 +10,7 @@
     <Compile Include="ClaudeUsageParserTests.fs" />
     <Compile Include="ProviderUsageShapeTests.fs" />
     <Compile Include="AntigravityUsageParserTests.fs" />
+    <Compile Include="CliOAuthRefresherTests.fs" />
   </ItemGroup>
 
   <ItemGroup>
