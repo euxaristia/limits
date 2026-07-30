@@ -30,7 +30,7 @@ Designed to be run as an interactive terminal CLI or piped directly into status 
 ```bash
 # Pack and install locally
 dotnet pack Limits.Cli/Limits.Cli.fsproj -c Release -o ./nupkg
-dotnet tool install --global --add-source ./nupkg Limits.Cli
+dotnet tool install --global --add-source ./nupkg limits-cli
 ```
 
 ### Building & Running from Source
