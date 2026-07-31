@@ -53,3 +53,8 @@ _ReSharper*/
 # Generated files
 Generated\ Files/
 *_wpftmp.csproj
+
+# Go binaries
+/limits
+/limits.exe
+
