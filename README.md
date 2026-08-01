@@ -23,14 +23,13 @@ Designed to be run as an interactive terminal CLI or piped directly into status 
 
 ### Requirements
 
-- **.NET 11 SDK** or runtime (macOS, Linux, Windows)
+- **Go 1.22+** (macOS, Linux, Windows)
 
-### Installing as a Global .NET Tool
+### Installing Global Binary
 
 ```bash
-# Pack and install locally
-dotnet pack Limits.Cli/Limits.Cli.fsproj -c Release -o ./nupkg
-dotnet tool install --global --add-source ./nupkg limits-cli
+# Build and install to $GOPATH/bin or /usr/local/bin
+go install github.com/euxaristia/limits@latest
 ```
 
 ### Building & Running from Source
@@ -40,11 +39,14 @@ dotnet tool install --global --add-source ./nupkg limits-cli
 git clone https://github.com/euxaristia/limits.git
 cd limits
 
+# Build statically linked binary
+go build -ldflags="-s -w" -o limits main.go
+
 # Run CLI status check
-dotnet run --project Limits.Cli/Limits.Cli.fsproj -- status
+./limits status
 
 # Run CLI with JSON output
-dotnet run --project Limits.Cli/Limits.Cli.fsproj -- --json
+./limits --json
 ```
 
 ---
