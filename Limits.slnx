@@ -1,7 +1,0 @@
-<Solution>
-  <Folder Name="/Tests/">
-    <Project Path="Tests/Limits.Core.Tests.fsproj" />
-  </Folder>
-  <Project Path="Limits.Cli/Limits.Cli.fsproj" />
-  <Project Path="Limits.Core/Limits.Core.fsproj" />
-</Solution>
