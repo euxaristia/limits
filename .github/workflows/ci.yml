@@ -17,36 +17,52 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            ext: ''
+          - os: windows-latest
+            ext: '.exe'
+          - os: macos-latest
+            ext: ''
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Setup .NET SDK
-        uses: actions/setup-dotnet@v4
+      - name: Setup Go
+        uses: actions/setup-go@v7
         with:
-          dotnet-version: |
-            9.0.x
-            10.0.x
-            11.0.x
-          include-prerelease: true
+          go-version-file: go.mod
+          # The module has no external dependencies, so there is no go.sum
+          # for the built-in cache to key on.
+          cache: false
 
-      - name: Restore Dependencies
-        run: dotnet restore Limits.slnx
-
-      - name: Build Core & CLI Solution
-        run: dotnet build Limits.slnx --configuration Release --no-restore
-
-      - name: Run Core Unit Tests
-        run: dotnet test Tests/Limits.Core.Tests.fsproj --configuration Release --no-build --verbosity normal
-
-      - name: Pack limits-cli Global Tool
-        run: dotnet pack Limits.Cli/Limits.Cli.fsproj --configuration Release --no-build -o ./nupkg
-
-      - name: Upload Package Artifact
+      # Windows checkouts rewrite the repo's LF endings to CRLF, which gofmt
+      # reports as unformatted, so this check only runs on Linux.
+      - name: Check Formatting
         if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v4
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run Unit Tests
+        run: go test ./... -v
+
+      - name: Build limits Binary
+        shell: bash
+        run: go build -o "dist/limits${{ matrix.ext }}" .
+
+      - name: Upload Binary Artifact
+        uses: actions/upload-artifact@v7
         with:
-          name: limits-cli-nupkg
-          path: ./nupkg/*.nupkg
+          name: limits-${{ matrix.os }}
+          path: dist/limits${{ matrix.ext }}
+          if-no-files-found: error
