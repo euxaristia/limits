@@ -378,6 +378,7 @@ func IsCliAvailable(cmdName string) bool {
 
 func RunCliHeadless(cliName string, args []string, timeoutSec float64) bool {
 	ctxCmd := exec.Command(cliName, args...)
+	PrepareHeadless(ctxCmd)
 	done := make(chan error, 1)
 
 	if err := ctxCmd.Start(); err != nil {

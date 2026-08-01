@@ -2,13 +2,13 @@ package fetchers
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -632,121 +632,184 @@ func fetchGrokUsage(tokenOpt *credentials.GrokToken, apiKey string) models.Provi
 }
 
 // 8. Copilot
+
+// copilotQuotaLabels names the quotas GitHub reports, in the order we show
+// them. Anything GitHub adds later is appended after these, alphabetically.
+var copilotQuotaLabels = []struct{ id, label string }{
+	{"premium_interactions", "Premium"},
+	{"chat", "Chat"},
+	{"completions", "Completions"},
+}
+
+var copilotPlanNames = map[string]string{
+	"free_limited_copilot": "Copilot Free",
+	"copilot_for_business": "Copilot Business",
+	"copilot_enterprise":   "Copilot Enterprise",
+	"copilot_pro":          "Copilot Pro",
+}
+
+type copilotQuota struct {
+	Unlimited        bool     `json:"unlimited"`
+	HasQuota         bool     `json:"has_quota"`
+	PercentRemaining float64  `json:"percent_remaining"`
+	Entitlement      float64  `json:"entitlement"`
+	Remaining        *float64 `json:"remaining"`
+}
+
+type copilotUser struct {
+	Login         string                  `json:"login"`
+	AccessTypeSku string                  `json:"access_type_sku"`
+	CopilotPlan   string                  `json:"copilot_plan"`
+	QuotaResetUTC string                  `json:"quota_reset_date_utc"`
+	Quotas        map[string]copilotQuota `json:"quota_snapshots"`
+}
+
+// copilotWindows turns the reported quotas into display rows, in a stable
+// order, and reports whether any of them is spent.
+func copilotWindows(payload copilotUser) ([]windowSpec, bool) {
+	resetCountdown := ""
+	if strings.TrimSpace(payload.QuotaResetUTC) != "" {
+		resetCountdown = parsers.FormatCountdown(payload.QuotaResetUTC)
+	}
+
+	ordered := make([]string, 0, len(payload.Quotas))
+	labels := map[string]string{}
+	for _, known := range copilotQuotaLabels {
+		if _, ok := payload.Quotas[known.id]; ok {
+			ordered = append(ordered, known.id)
+			labels[known.id] = known.label
+		}
+	}
+	extras := make([]string, 0, len(payload.Quotas))
+	for id := range payload.Quotas {
+		if _, named := labels[id]; !named {
+			extras = append(extras, id)
+		}
+	}
+	sort.Strings(extras)
+	ordered = append(ordered, extras...)
+
+	var specs []windowSpec
+	exhausted := false
+	for _, id := range ordered {
+		q := payload.Quotas[id]
+		// GitHub lists every quota it knows about, including ones this plan has
+		// no entitlement to. Showing those as 0% would imply they are usable.
+		if !q.HasQuota && !q.Unlimited {
+			continue
+		}
+
+		label := labels[id]
+		if label == "" && id != "" {
+			label = strings.ToUpper(id[:1]) + strings.ReplaceAll(id[1:], "_", " ")
+		}
+
+		if q.Unlimited {
+			text := "Unlimited"
+			specs = append(specs, windowSpec{label: label, pct: 0.0, reset: resetCountdown, secs: 30 * 24 * 3600, pctTextOverride: &text})
+			continue
+		}
+
+		pct, used := q.usedOf()
+		if pct >= 100.0 {
+			exhausted = true
+		}
+		text := fmt.Sprintf("%.0f / %.0f (%.1f%% used)", used, q.Entitlement, pct)
+		specs = append(specs, windowSpec{label: label, pct: pct, reset: resetCountdown, secs: 30 * 24 * 3600, pctTextOverride: &text})
+	}
+
+	return specs, exhausted
+}
+
+// usedOf reports how much of the quota is spent, as a percentage and as a
+// count. GitHub sends what is left, not what is gone.
+func (q copilotQuota) usedOf() (float64, float64) {
+	pct := math.Max(0.0, math.Min(100.0, 100.0-q.PercentRemaining))
+	used := q.Entitlement * pct / 100.0
+	if q.Remaining != nil {
+		used = q.Entitlement - *q.Remaining
+	}
+	return pct, math.Max(0.0, used)
+}
+
 func fetchCopilotUsage(cfg models.ProviderConfig) models.ProviderUsage {
 	provider := models.Copilot
 	name := models.GetDisplayName(provider)
 
 	bearer := cfg.APIKey
 	if strings.TrimSpace(bearer) == "" {
-		out, err := exec.Command("gh", "auth", "token").Output()
+		ghCmd := exec.Command("gh", "auth", "token")
+		credentials.PrepareHeadless(ghCmd)
+		out, err := ghCmd.Output()
 		if err == nil {
 			bearer = strings.TrimSpace(string(out))
 		}
 	}
 
-	isQuotaExceeded, foundInCache := credentials.TryLoadCopilotCache()
-	if !foundInCache {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-
-		cmd := exec.CommandContext(ctx, "copilot", "-p", "check", "--silent")
-		out, _ := cmd.CombinedOutput()
-		outStr := string(out)
-
-		isQuotaExceeded = strings.Contains(strings.ToLower(outStr), "used all your copilot free") ||
-			strings.Contains(strings.ToLower(outStr), "exceeded your monthly quota")
-		credentials.SaveCopilotCache(isQuotaExceeded)
-	}
-
-	if strings.TrimSpace(bearer) == "" && !isQuotaExceeded {
+	bearer = strings.TrimSpace(bearer)
+	if bearer == "" {
 		return GetUnconfiguredData(provider)
 	}
 
-	var userLogin string
-	if strings.TrimSpace(bearer) != "" {
-		req, err := http.NewRequest("GET", "https://api.github.com/user", nil)
-		if err == nil {
-			setupHeaders(req)
-			req.Header.Set("Accept", "application/vnd.github+json")
-			req.Header.Set("X-GitHub-Api-Version", "2026-03-10")
-			req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(bearer))
+	// The documented REST API only reports Copilot seats for organisations. The
+	// per-user quota lives on the endpoint the editor plugins read, which is
+	// undocumented and can change without notice, hence the explicit degraded
+	// state below rather than a fabricated healthy one.
+	req, err := http.NewRequest("GET", "https://api.github.com/copilot_internal/user", nil)
+	if err != nil {
+		return copilotUnavailable(provider, name, err.Error())
+	}
+	setupHeaders(req)
+	req.Header.Set("Authorization", "Bearer "+bearer)
 
-			resp, err := httpClient.Do(req)
-			if err == nil && resp.StatusCode == http.StatusOK {
-				body, _ := io.ReadAll(resp.Body)
-				var uMap map[string]interface{}
-				if err := json.Unmarshal(body, &uMap); err == nil {
-					userLogin, _ = uMap["login"].(string)
-				}
-				resp.Body.Close()
-			}
-		}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return copilotUnavailable(provider, name, err.Error())
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return copilotUnavailable(provider, name, fmt.Sprintf("GitHub returned %s", resp.Status))
 	}
 
-	monthlyResetCountdown := func() string {
-		now := time.Now().UTC()
-		var nextMonth time.Time
-		if now.Month() == 12 {
-			nextMonth = time.Date(now.Year()+1, 1, 1, 0, 0, 0, 0, time.UTC)
-		} else {
-			nextMonth = time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, time.UTC)
-		}
-		return parsers.FormatCountdown(nextMonth.Format(time.RFC3339))
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return copilotUnavailable(provider, name, err.Error())
 	}
 
-	if isQuotaExceeded {
-		userLabel := userLogin
-		if userLabel == "" {
-			userLabel = "user"
-		}
-		textOverride := "200 / 200 AIC (100.0% used)"
-		footerMsg := fmt.Sprintf("GitHub User: %s (Plan: Copilot Free - Quota Exceeded)", userLabel)
-		return models.ProviderUsage{
-			Provider:    models.ProviderToString(provider),
-			ID:          "copilot",
-			DisplayName: name,
-			Windows: []models.UsageWindow{
-				{
-					Label:               "Copilot Free",
-					UsedPercent:         100.0,
-					ResetCountdown:      monthlyResetCountdown(),
-					WindowSeconds:       30 * 24 * 3600,
-					PercentTextOverride: &textOverride,
-				},
-			},
-			Status:       "healthy",
-			IsMock:       false,
-			HasError:     false,
-			ErrorMessage: "",
-			Footer:       footerMsg,
-		}
+	var payload copilotUser
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return copilotUnavailable(provider, name, "unexpected response shape")
 	}
 
-	userLabel := userLogin
+	specs, exhausted := copilotWindows(payload)
+	if len(specs) == 0 {
+		return copilotUnavailable(provider, name, "no quotas reported for this account")
+	}
+
+	userLabel := payload.Login
 	if userLabel == "" {
 		userLabel = "user"
 	}
-	textOverride := "0.0% used (Active & Unlimited)"
-	footerMsg := fmt.Sprintf("GitHub Copilot (User: %s)", userLabel)
-	return models.ProviderUsage{
-		Provider:    models.ProviderToString(provider),
-		ID:          "copilot",
-		DisplayName: name,
-		Windows: []models.UsageWindow{
-			{
-				Label:               "Individual",
-				UsedPercent:         0.0,
-				ResetCountdown:      monthlyResetCountdown(),
-				WindowSeconds:       30 * 24 * 3600,
-				PercentTextOverride: &textOverride,
-			},
-		},
-		Status:       "healthy",
-		IsMock:       false,
-		HasError:     false,
-		ErrorMessage: "",
-		Footer:       footerMsg,
+	planLabel := copilotPlanNames[payload.AccessTypeSku]
+	if planLabel == "" {
+		planLabel = payload.CopilotPlan
 	}
+
+	footer := fmt.Sprintf("GitHub Copilot (User: %s)", userLabel)
+	if planLabel != "" {
+		footer = fmt.Sprintf("GitHub Copilot (User: %s, Plan: %s)", userLabel, planLabel)
+	}
+	if exhausted {
+		footer += " - Quota Exceeded"
+	}
+
+	return multiWindow(provider, "copilot", name, specs, "healthy", false, false, "", footer)
+}
+
+func copilotUnavailable(provider models.UsageProvider, name, reason string) models.ProviderUsage {
+	return multiWindow(provider, "copilot", name, nil, "degraded", false, true,
+		fmt.Sprintf("Copilot quota unavailable: %s", reason), "")
 }
 
 func Fetch(cfg models.ProviderConfig) models.ProviderUsage {
