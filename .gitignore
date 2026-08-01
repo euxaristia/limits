@@ -57,4 +57,5 @@ Generated\ Files/
 # Go binaries
 /limits
 /limits.exe
+/dist/
 
