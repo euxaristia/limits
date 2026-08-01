@@ -22,8 +22,8 @@ type rawBucket struct {
 	ModelId           string
 	Family            string
 	RemainingFraction float64
-	ResetCountdown   string
-	Timeframe        string
+	ResetCountdown    string
+	Timeframe         string
 }
 
 func familyFromModelID(modelID string) string {
@@ -210,8 +210,8 @@ func ParseAntigravityQuota(data []byte) []AntigravityBucket {
 				ModelId:           modelID,
 				Family:            familyFromModelID(modelID),
 				RemainingFraction: remaining,
-				ResetCountdown:   reset,
-				Timeframe:        timeframe,
+				ResetCountdown:    reset,
+				Timeframe:         timeframe,
 			})
 		}
 
