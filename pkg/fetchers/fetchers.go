@@ -63,10 +63,10 @@ func singleWindow(
 }
 
 type windowSpec struct {
-	label          string
-	pct            float64
-	reset          string
-	secs           int
+	label           string
+	pct             float64
+	reset           string
+	secs            int
 	pctTextOverride *string
 }
 

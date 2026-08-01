@@ -27,12 +27,15 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          # The module has no external dependencies, so there is no go.sum
+          # for the built-in cache to key on.
+          cache: false
 
       # Windows checkouts rewrite the repo's LF endings to CRLF, which gofmt
       # reports as unformatted, so this check only runs on Linux.
@@ -58,7 +61,7 @@ jobs:
         run: go build -o "dist/limits${{ matrix.ext }}" .
 
       - name: Upload Binary Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: limits-${{ matrix.os }}
           path: dist/limits${{ matrix.ext }}
