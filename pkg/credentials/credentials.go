@@ -199,6 +199,47 @@ type ClaudeToken struct {
 	ExpiresAt   *time.Time
 }
 
+// CodexToken is the ChatGPT session recorded by the Codex CLI after `codex login`.
+// It is intentionally limited to the fields needed to read the account usage endpoint.
+type CodexToken struct {
+	AccessToken string
+	AccountID   string
+	PlanType    string
+}
+
+// LoadCodexToken reads the existing Codex CLI login without copying it into limits'
+// configuration. ChatGPT authentication is not an OpenAI API key.
+func LoadCodexToken() (*CodexToken, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		homeDir = "."
+	}
+
+	data, err := os.ReadFile(filepath.Join(homeDir, ".codex", "auth.json"))
+	if err != nil {
+		return nil, err
+	}
+
+	var root struct {
+		Tokens struct {
+			AccessToken string `json:"access_token"`
+			AccountID   string `json:"account_id"`
+			PlanType    string `json:"plan_type"`
+		} `json:"tokens"`
+	}
+	if err := json.Unmarshal(data, &root); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(root.Tokens.AccessToken) == "" {
+		return nil, errors.New("missing Codex ChatGPT access token")
+	}
+
+	return &CodexToken{
+		AccessToken: root.Tokens.AccessToken,
+		AccountID:   root.Tokens.AccountID,
+		PlanType:    root.Tokens.PlanType,
+	}, nil
+}
 func LoadClaudeToken() (*ClaudeToken, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
