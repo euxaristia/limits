@@ -130,7 +130,7 @@ func GetUnconfiguredData(provider models.UsageProvider) models.ProviderUsage {
 	case models.Cursor:
 		msg = "API key or token required"
 	case models.Codex:
-		msg = "API key or token required"
+		msg = "ChatGPT login required. Run 'codex login' to create ~/.codex/auth.json"
 	case models.Copilot:
 		msg = "API key and organization required. Set with 'limits config set-key copilot <token>' and set the provider 'region' to your org name"
 	default:
@@ -148,6 +148,51 @@ func GetUnconfiguredData(provider models.UsageProvider) models.ProviderUsage {
 		ErrorMessage: msg,
 		Footer:       "",
 	}
+}
+
+func fetchCodexUsage() models.ProviderUsage {
+	provider := models.Codex
+	name := models.GetDisplayName(provider)
+	token, err := credentials.LoadCodexToken()
+	if err != nil {
+		return GetUnconfiguredData(provider)
+	}
+
+	req, err := http.NewRequest("GET", "https://chatgpt.com/backend-api/wham/usage", nil)
+	if err != nil {
+		return multiWindow(provider, "codex", name, nil, "degraded", false, true, err.Error(), "")
+	}
+	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	req.Header.Set("User-Agent", "codex-cli")
+	req.Header.Set("Accept", "application/json")
+	if strings.TrimSpace(token.AccountID) != "" {
+		req.Header.Set("ChatGPT-Account-Id", token.AccountID)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return multiWindow(provider, "codex", name, nil, "degraded", false, true, err.Error(), "")
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return multiWindow(provider, "codex", name, nil, "degraded", false, true,
+			fmt.Sprintf("Codex usage API returned HTTP %d; run 'codex login' if your session expired", resp.StatusCode), "")
+	}
+
+	usage, err := parsers.ParseCodexUsage(body, time.Now())
+	if err != nil {
+		return multiWindow(provider, "codex", name, nil, "degraded", false, true, err.Error(), "")
+	}
+	specs := make([]windowSpec, len(usage.Windows))
+	for i, window := range usage.Windows {
+		specs[i] = windowSpec{label: window.Label, pct: window.UsedPercent, reset: window.ResetCountdown, secs: window.WindowSeconds}
+	}
+	footer := "ChatGPT"
+	if usage.PlanType != "" {
+		footer += " " + usage.PlanType
+	}
+	return multiWindow(provider, "codex", name, specs, "healthy", false, false, "", footer)
 }
 
 // 1. OpenAI
@@ -818,6 +863,8 @@ func Fetch(cfg models.ProviderConfig) models.ProviderUsage {
 	hasCookie := strings.TrimSpace(cfg.CookieHeader) != ""
 
 	switch provider {
+	case models.Codex:
+		return fetchCodexUsage()
 	case models.OpenAI:
 		if hasAPIKey {
 			return fetchOpenAIBalance(cfg.APIKey)
