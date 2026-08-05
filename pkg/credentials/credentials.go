@@ -90,33 +90,44 @@ func parseAntigravityTokenJSON(data []byte) (*Token, error) {
 func loadAntigravityKeyringJSON() ([]byte, error) {
 	const service, account = "gemini", "antigravity"
 
-	var cmd *exec.Cmd
+	var raw []byte
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("security", "find-generic-password", "-s", service, "-a", account, "-w")
+		out, err := exec.Command("security", "find-generic-password", "-s", service, "-a", account, "-w").Output()
+		if err != nil {
+			return nil, err
+		}
+		raw = out
 	case "linux":
-		cmd = exec.Command("secret-tool", "lookup", "service", service, "username", account)
+		out, err := exec.Command("secret-tool", "lookup", "service", service, "username", account).Output()
+		if err != nil {
+			return nil, err
+		}
+		raw = out
+	case "windows":
+		// go-keyring's wincred backend stores the entry under Windows Credential
+		// Manager as a generic credential named "service:account".
+		out, err := readWindowsKeyringSecret(service + ":" + account)
+		if err != nil {
+			return nil, err
+		}
+		raw = out
 	default:
 		return nil, errors.New("keyring lookup unsupported on " + runtime.GOOS)
 	}
 
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, err
-	}
-
-	raw := strings.TrimSpace(string(out))
-	if raw == "" {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
 		return nil, errors.New("empty keyring entry")
 	}
-	if encoded, ok := strings.CutPrefix(raw, "go-keyring-base64:"); ok {
+	if encoded, ok := strings.CutPrefix(trimmed, "go-keyring-base64:"); ok {
 		decoded, err := base64.StdEncoding.DecodeString(encoded)
 		if err != nil {
 			return nil, err
 		}
 		return decoded, nil
 	}
-	return []byte(raw), nil
+	return []byte(trimmed), nil
 }
 
 func LoadAntigravityToken() (*Token, error) {
