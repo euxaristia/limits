@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"limits/pkg/config"
@@ -220,11 +221,24 @@ func handleConfigCommand(args []string) int {
 
 func listProviders() {
 	cfg := config.Load()
+
+	sort.SliceStable(cfg.Providers, func(i, j int) bool {
+		iEnabled := cfg.Providers[i].IsEnabled()
+		jEnabled := cfg.Providers[j].IsEnabled()
+		if iEnabled != jEnabled {
+			return iEnabled
+		}
+		return strings.ToLower(cfg.Providers[i].ID) < strings.ToLower(cfg.Providers[j].ID)
+	})
+
 	fmt.Println(terminal.Bold("Available Providers:"))
 	fmt.Println()
 	for _, p := range cfg.Providers {
 		providerEnum := models.ProviderFromString(p.ID)
 		displayName := models.GetDisplayName(providerEnum)
+		if displayName == "Unknown" {
+			displayName = strings.Title(p.ID)
+		}
 		isEnabled := p.IsEnabled()
 
 		statusStr := terminal.Dim("[DISABLED]")
@@ -237,7 +251,7 @@ func listProviders() {
 			keyStr = terminal.Cyan("(API Key Set)")
 		}
 
-		fmt.Printf("  %-12s %s %-16s %s\n", p.ID, statusStr, displayName, keyStr)
+		fmt.Printf("  %-18s %s %-18s %s\n", p.ID, statusStr, displayName, keyStr)
 	}
 	fmt.Println()
 }
