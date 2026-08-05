@@ -82,6 +82,25 @@ func renderUsage(maxLabelWidth int, u models.ProviderUsage) {
 	fmt.Println()
 }
 
+// displayPriority puts these providers first, in this order; everything else
+// keeps its existing relative position from the config file.
+var displayPriority = []string{"claude", "grok", "antigravity", "codex"}
+
+func sortProvidersForDisplay(configs []models.ProviderConfig) {
+	rank := make(map[string]int, len(displayPriority))
+	for i, id := range displayPriority {
+		rank[id] = i
+	}
+	sort.SliceStable(configs, func(i, j int) bool {
+		ri, iOk := rank[strings.ToLower(configs[i].ID)]
+		rj, jOk := rank[strings.ToLower(configs[j].ID)]
+		if iOk && jOk {
+			return ri < rj
+		}
+		return iOk && !jOk
+	})
+}
+
 func fetchAndDisplayStatus(jsonOutput bool, targetProvider string) int {
 	cfg := config.Load()
 
@@ -93,6 +112,7 @@ func fetchAndDisplayStatus(jsonOutput bool, targetProvider string) int {
 			}
 		}
 	}
+	sortProvidersForDisplay(activeConfigs)
 
 	if len(activeConfigs) == 0 {
 		if jsonOutput {
