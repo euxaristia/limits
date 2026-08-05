@@ -83,16 +83,68 @@ func parseAntigravityTokenJSON(data []byte) (*Token, error) {
 	}, nil
 }
 
+// loadAntigravityKeyringJSON returns the raw credential JSON the Antigravity CLI
+// stores in the OS keyring. Recent versions (1.1.x) keep the live token there and
+// leave the on-disk token file behind as a stale artifact. The value is written by
+// go-keyring, which base64-encodes payloads behind a "go-keyring-base64:" marker.
+func loadAntigravityKeyringJSON() ([]byte, error) {
+	const service, account = "gemini", "antigravity"
+
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("security", "find-generic-password", "-s", service, "-a", account, "-w")
+	case "linux":
+		cmd = exec.Command("secret-tool", "lookup", "service", service, "username", account)
+	default:
+		return nil, errors.New("keyring lookup unsupported on " + runtime.GOOS)
+	}
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	raw := strings.TrimSpace(string(out))
+	if raw == "" {
+		return nil, errors.New("empty keyring entry")
+	}
+	if encoded, ok := strings.CutPrefix(raw, "go-keyring-base64:"); ok {
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return nil, err
+		}
+		return decoded, nil
+	}
+	return []byte(raw), nil
+}
+
 func LoadAntigravityToken() (*Token, error) {
+	if data, err := loadAntigravityKeyringJSON(); err == nil {
+		if token, err := parseAntigravityTokenJSON(data); err == nil {
+			return token, nil
+		}
+	}
+
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		homeDir = "."
 	}
 
-	paths := []string{
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "credentials.json"),
-		filepath.Join(homeDir, ".config", "antigravity", "credentials.json"),
-		filepath.Join(homeDir, ".config", "agy", "credentials.json"),
+	dirs := []string{
+		filepath.Join(homeDir, ".gemini", "antigravity-cli"),
+		filepath.Join(homeDir, ".config", "antigravity"),
+		filepath.Join(homeDir, ".config", "agy"),
+	}
+	// The agy CLI writes its OAuth token to "antigravity-oauth-token"; older and
+	// alternate installs use "credentials.json".
+	names := []string{"antigravity-oauth-token", "credentials.json"}
+
+	var paths []string
+	for _, d := range dirs {
+		for _, n := range names {
+			paths = append(paths, filepath.Join(d, n))
+		}
 	}
 
 	for _, p := range paths {
