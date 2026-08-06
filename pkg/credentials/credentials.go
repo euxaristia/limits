@@ -532,9 +532,12 @@ func getCliCandidates(provider models.UsageProvider) []candidate {
 			{cli: "grok", args: []string{"auth", "status"}},
 		}
 	case models.Antigravity:
+		// "--version" is a static local print that never touches the keyring or
+		// network, so it can't refresh an expired token. "models" hits an
+		// authenticated endpoint, which forces the CLI to refresh as a side effect.
 		return []candidate{
-			{cli: "agy", args: []string{"--version"}},
-			{cli: "antigravity", args: []string{"--version"}},
+			{cli: "agy", args: []string{"models"}},
+			{cli: "antigravity", args: []string{"models"}},
 		}
 	case models.Claude:
 		return []candidate{
