@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"limits/pkg/parsers"
+	"github.com/euxaristia/limits/pkg/parsers"
 )
 
 func TestAntigravityParser_EmptyPayload(t *testing.T) {
