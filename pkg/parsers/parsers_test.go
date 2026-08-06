@@ -97,6 +97,34 @@ func TestAntigravityParser_GeminiOrderedBeforeClaude(t *testing.T) {
 	}
 }
 
+func TestAntigravityParser_SessionOrderedBeforeWeekly(t *testing.T) {
+	weeklyReset := time.Now().UTC().Add(5 * 24 * time.Hour).Format(time.RFC3339)
+	sessionReset := time.Now().UTC().Add(1 * time.Hour).Format(time.RFC3339)
+	jsonStr := fmt.Sprintf(`{
+		"groups": [
+			{
+				"displayName": "Gemini",
+				"description": "Gemini models",
+				"buckets": [
+					{ "remainingFraction": 0.76, "resetTime": "%s", "window": "weekly" },
+					{ "remainingFraction": 0.0, "resetTime": "%s", "window": "5h" }
+				]
+			}
+		]
+	}`, weeklyReset, sessionReset)
+
+	r := parsers.ParseAntigravityQuota([]byte(jsonStr))
+	if len(r) != 2 {
+		t.Fatalf("expected 2 buckets, got %d", len(r))
+	}
+	if r[0].Timeframe != "Session" {
+		t.Errorf("expected first bucket to be Session, got %s", r[0].Timeframe)
+	}
+	if r[1].Timeframe != "Weekly" {
+		t.Errorf("expected second bucket to be Weekly, got %s", r[1].Timeframe)
+	}
+}
+
 func TestClaudeParser_TwoBuckets(t *testing.T) {
 	jsonStr := `{
 		"five_hour": { "utilization": 45.0, "resets_at": "2026-07-31T20:00:00Z" },
