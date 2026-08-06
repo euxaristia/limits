@@ -86,14 +86,48 @@ func renderUsage(maxLabelWidth int, u models.ProviderUsage) {
 // keeps its existing relative position from the config file.
 var displayPriority = []string{"claude", "grok", "antigravity", "codex"}
 
-func sortProvidersForDisplay(configs []models.ProviderConfig) {
-	rank := make(map[string]int, len(displayPriority))
-	for i, id := range displayPriority {
-		rank[id] = i
+func getPriorityRank(id string) (int, bool) {
+	for i, p := range displayPriority {
+		if strings.EqualFold(p, id) {
+			return i, true
+		}
 	}
+	return 0, false
+}
+
+func sortProvidersForDisplay(configs []models.ProviderConfig) {
 	sort.SliceStable(configs, func(i, j int) bool {
-		ri, iOk := rank[strings.ToLower(configs[i].ID)]
-		rj, jOk := rank[strings.ToLower(configs[j].ID)]
+		ri, iOk := getPriorityRank(configs[i].ID)
+		rj, jOk := getPriorityRank(configs[j].ID)
+		if iOk && jOk {
+			return ri < rj
+		}
+		return iOk && !jOk
+	})
+}
+
+func isExhausted(u models.ProviderUsage) bool {
+	if len(u.Windows) == 0 {
+		return false
+	}
+	for _, w := range u.Windows {
+		if w.UsedPercent < 100.0 {
+			return false
+		}
+	}
+	return true
+}
+
+func sortResultsByUsage(results []models.ProviderUsage) {
+	sort.SliceStable(results, func(i, j int) bool {
+		iExhausted := isExhausted(results[i])
+		jExhausted := isExhausted(results[j])
+		if iExhausted != jExhausted {
+			return !iExhausted
+		}
+
+		ri, iOk := getPriorityRank(results[i].ID)
+		rj, jOk := getPriorityRank(results[j].ID)
 		if iOk && jOk {
 			return ri < rj
 		}
@@ -133,6 +167,7 @@ func fetchAndDisplayStatus(jsonOutput bool, targetProvider string) int {
 			results = append(results, u)
 		}
 	}
+	sortResultsByUsage(results)
 
 	if jsonOutput {
 		if results == nil {
