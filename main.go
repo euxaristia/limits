@@ -7,10 +7,10 @@ import (
 	"sort"
 	"strings"
 
-	"limits/pkg/config"
-	"limits/pkg/fetchers"
-	"limits/pkg/models"
-	"limits/pkg/terminal"
+	"github.com/euxaristia/limits/pkg/config"
+	"github.com/euxaristia/limits/pkg/fetchers"
+	"github.com/euxaristia/limits/pkg/models"
+	"github.com/euxaristia/limits/pkg/terminal"
 )
 
 const Version = "1.1.0"

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"limits/pkg/models"
+	"github.com/euxaristia/limits/pkg/models"
 )
 
 func boolPtr(b bool) *bool {
