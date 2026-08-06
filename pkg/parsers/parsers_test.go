@@ -97,6 +97,59 @@ func TestAntigravityParser_GeminiOrderedBeforeClaude(t *testing.T) {
 	}
 }
 
+func TestAntigravityParser_SessionOrderedBeforeWeekly(t *testing.T) {
+	// Weekly's reset is deliberately sooner than Session's, so the test only
+	// passes if the sort ranks by Timeframe rather than by reset time.
+	weeklyReset := time.Now().UTC().Add(1 * time.Hour).Format(time.RFC3339)
+	sessionReset := time.Now().UTC().Add(5 * 24 * time.Hour).Format(time.RFC3339)
+	jsonStr := fmt.Sprintf(`{
+		"groups": [
+			{
+				"displayName": "Gemini",
+				"description": "Gemini models",
+				"buckets": [
+					{ "remainingFraction": 0.76, "resetTime": "%s", "window": "weekly" },
+					{ "remainingFraction": 0.0, "resetTime": "%s", "window": "5h" }
+				]
+			}
+		]
+	}`, weeklyReset, sessionReset)
+
+	r := parsers.ParseAntigravityQuota([]byte(jsonStr))
+	if len(r) != 2 {
+		t.Fatalf("expected 2 buckets, got %d", len(r))
+	}
+	if r[0].Timeframe != "Session" {
+		t.Errorf("expected first bucket to be Session, got %s", r[0].Timeframe)
+	}
+	if r[1].Timeframe != "Weekly" {
+		t.Errorf("expected second bucket to be Weekly, got %s", r[1].Timeframe)
+	}
+}
+
+func TestAntigravityParser_FallbackSessionOrderedBeforeWeekly(t *testing.T) {
+	// Exercises the legacy top-level "buckets" fallback path (no "groups"),
+	// which has its own sort separate from the "groups" path above. Weekly's
+	// reset ("10h") sorts after Session's ("1h") alphabetically too, so this
+	// only passes if the sort ranks by Timeframe rather than by duration text.
+	weeklyReset := time.Now().UTC().Add(10 * time.Hour).Format(time.RFC3339)
+	sessionReset := time.Now().UTC().Add(1 * time.Hour).Format(time.RFC3339)
+	b1 := fmt.Sprintf(`{ "modelId": "gemini-3-1-pro", "remainingFraction": 0.5, "resetTime": "%s" }`, weeklyReset)
+	b2 := fmt.Sprintf(`{ "modelId": "gemini-3-1-flash", "remainingFraction": 0.2, "resetTime": "%s" }`, sessionReset)
+	jsonStr := fmt.Sprintf(`{ "buckets": [ %s, %s ] }`, b1, b2)
+
+	r := parsers.ParseAntigravityQuota([]byte(jsonStr))
+	if len(r) != 2 {
+		t.Fatalf("expected 2 buckets, got %d", len(r))
+	}
+	if r[0].Timeframe != "Session" {
+		t.Errorf("expected first bucket to be Session, got %s", r[0].Timeframe)
+	}
+	if r[1].Timeframe != "Weekly" {
+		t.Errorf("expected second bucket to be Weekly, got %s", r[1].Timeframe)
+	}
+}
+
 func TestClaudeParser_TwoBuckets(t *testing.T) {
 	jsonStr := `{
 		"five_hour": { "utilization": 45.0, "resets_at": "2026-07-31T20:00:00Z" },
