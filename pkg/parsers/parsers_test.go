@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"limits/pkg/parsers"
+	"github.com/euxaristia/limits/pkg/parsers"
 )
 
 func TestAntigravityParser_EmptyPayload(t *testing.T) {
@@ -113,8 +113,8 @@ func TestClaudeParser_TwoBuckets(t *testing.T) {
 }
 
 func TestEmailRedactor(t *testing.T) {
-	redacted := parsers.RedactEmail("Grok CLI (abcdefghij@privaterelay.example.com)")
-	if redacted != "Grok CLI (c***z@privaterelay.example.com)" {
+	redacted := parsers.RedactEmail("Grok CLI (abcdefghij@example.com)")
+	if redacted != "Grok CLI (a***j@example.com)" {
 		t.Errorf("unexpected redaction: %s", redacted)
 	}
 
