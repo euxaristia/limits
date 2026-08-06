@@ -164,12 +164,14 @@ func ParseAntigravityQuota(data []byte) []AntigravityBucket {
 			if rI != rJ {
 				return rI < rJ
 			}
+			// Session is ranked before Weekly: if the session window is exhausted,
+			// the weekly one is moot until it resets, so it's the more urgent number.
 			tI := 1
-			if result[i].Timeframe == "Weekly" {
+			if result[i].Timeframe == "Session" {
 				tI = 0
 			}
 			tJ := 1
-			if result[j].Timeframe == "Weekly" {
+			if result[j].Timeframe == "Session" {
 				tJ = 0
 			}
 			if tI != tJ {
@@ -259,6 +261,17 @@ func ParseAntigravityQuota(data []byte) []AntigravityBucket {
 			rI, rJ := familyRank(result[i].GroupLabel), familyRank(result[j].GroupLabel)
 			if rI != rJ {
 				return rI < rJ
+			}
+			tI := 1
+			if result[i].Timeframe == "Session" {
+				tI = 0
+			}
+			tJ := 1
+			if result[j].Timeframe == "Session" {
+				tJ = 0
+			}
+			if tI != tJ {
+				return tI < tJ
 			}
 			return result[i].ResetCountdown < result[j].ResetCountdown
 		})
