@@ -17,6 +17,17 @@ func TestIsExhausted(t *testing.T) {
 		t.Errorf("expected grok (100%% used) to be exhausted")
 	}
 
+	multiExhausted := models.ProviderUsage{
+		ID: "multi-exhausted",
+		Windows: []models.UsageWindow{
+			{Label: "Session", UsedPercent: 100.0},
+			{Label: "Weekly", UsedPercent: 100.0},
+		},
+	}
+	if !isExhausted(multiExhausted) {
+		t.Errorf("expected multi-window exhausted provider to be exhausted")
+	}
+
 	antigravity := models.ProviderUsage{
 		ID: "antigravity",
 		Windows: []models.UsageWindow{
@@ -43,19 +54,19 @@ func TestSortResultsByUsage_DemotesExhaustedProviders(t *testing.T) {
 	// Codex: 100% used -> Exhausted
 	// Copilot: 5.9%/0.0% used -> Usable
 	grok := models.ProviderUsage{
-		ID: "grok",
+		ID: "GrOk",
 		Windows: []models.UsageWindow{
 			{Label: "Weekly", UsedPercent: 100.0},
 		},
 	}
 	codex := models.ProviderUsage{
-		ID: "codex",
+		ID: "CoDeX",
 		Windows: []models.UsageWindow{
 			{Label: "Primary", UsedPercent: 100.0},
 		},
 	}
 	antigravity := models.ProviderUsage{
-		ID: "antigravity",
+		ID: "AnTiGrAvItY",
 		Windows: []models.UsageWindow{
 			{Label: "Session Gemini", UsedPercent: 2.0},
 			{Label: "Weekly Gemini", UsedPercent: 24.0},
@@ -63,14 +74,14 @@ func TestSortResultsByUsage_DemotesExhaustedProviders(t *testing.T) {
 		},
 	}
 	claude := models.ProviderUsage{
-		ID: "claude",
+		ID: "ClAuDe",
 		Windows: []models.UsageWindow{
 			{Label: "Session", UsedPercent: 28.0},
 			{Label: "Weekly", UsedPercent: 49.0},
 		},
 	}
 	copilot := models.ProviderUsage{
-		ID: "copilot",
+		ID: "CoPiLoT",
 		Windows: []models.UsageWindow{
 			{Label: "Chat", UsedPercent: 5.9},
 			{Label: "Completions", UsedPercent: 0.0},
@@ -82,7 +93,7 @@ func TestSortResultsByUsage_DemotesExhaustedProviders(t *testing.T) {
 
 	// Usable providers (claude, antigravity, copilot) should come first in priority order,
 	// demoting exhausted providers (grok, codex) to the bottom.
-	expectedOrder := []string{"claude", "antigravity", "copilot", "grok", "codex"}
+	expectedOrder := []string{"ClAuDe", "AnTiGrAvItY", "CoPiLoT", "GrOk", "CoDeX"}
 	for i, want := range expectedOrder {
 		if results[i].ID != want {
 			t.Errorf("at index %d: expected %s, got %s", i, want, results[i].ID)
