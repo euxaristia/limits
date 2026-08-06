@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"limits/pkg/models"
+	"github.com/euxaristia/limits/pkg/models"
 )
 
 type Token struct {

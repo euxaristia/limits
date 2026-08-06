@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"limits/pkg/credentials"
-	"limits/pkg/models"
-	"limits/pkg/parsers"
+	"github.com/euxaristia/limits/pkg/credentials"
+	"github.com/euxaristia/limits/pkg/models"
+	"github.com/euxaristia/limits/pkg/parsers"
 )
 
 var httpClient = &http.Client{

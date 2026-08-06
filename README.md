@@ -23,7 +23,7 @@ Designed to be run as an interactive terminal CLI or piped directly into status 
 
 ### Requirements
 
-- **Go 1.22+** (macOS, Linux, Windows)
+- **Go 1.26+** (macOS, Linux, Windows)
 
 ### Installing Global Binary
 
@@ -40,7 +40,7 @@ git clone https://github.com/euxaristia/limits.git
 cd limits
 
 # Build statically linked binary
-go build -ldflags="-s -w" -o limits main.go
+go build -ldflags="-s -w" -o limits .
 
 # Run CLI status check
 ./limits status
@@ -97,10 +97,15 @@ limits config disable openrouter
 
 ```
 limits/
-├── Limits.Core/         # Shared cross-platform F# core library (Models, Fetchers, ConfigStore)
-├── Limits.Cli/          # Cross-platform CLI executable (`limits`)
-├── Tests/               # Unit test suite (xUnit)
-└── Limits.slnx          # .NET Solution file
+├── main.go              # CLI entry point, argument parsing, output rendering
+├── pkg/
+│   ├── config/           # Config file loading, defaults, provider enable/disable
+│   ├── credentials/      # Cross-platform credential & keyring resolution
+│   ├── fetchers/         # Per-provider usage fetching
+│   ├── models/           # Shared types (UsageProvider, ProviderUsage, ...)
+│   ├── parsers/          # Response parsing per provider (with unit tests)
+│   └── terminal/         # ANSI color & progress bar rendering
+└── go.mod
 ```
 
 ---
