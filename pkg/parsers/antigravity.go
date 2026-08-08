@@ -179,7 +179,7 @@ func ParseAntigravityQuota(data []byte) []AntigravityBucket {
 			}
 			return result[i].ResetCountdown < result[j].ResetCountdown
 		})
-		return result
+		return filterExhaustedSessionBuckets(result)
 	}
 
 	// Fallback to "buckets" array
@@ -275,8 +275,28 @@ func ParseAntigravityQuota(data []byte) []AntigravityBucket {
 			}
 			return result[i].ResetCountdown < result[j].ResetCountdown
 		})
-		return result
+		return filterExhaustedSessionBuckets(result)
 	}
 
 	return nil
+}
+
+func filterExhaustedSessionBuckets(buckets []AntigravityBucket) []AntigravityBucket {
+	weeklyExhausted := make(map[string]bool)
+	for _, b := range buckets {
+		if b.Timeframe == "Weekly" && b.UsedPercent >= 100.0 {
+			weeklyExhausted[b.GroupLabel] = true
+		}
+	}
+	if len(weeklyExhausted) == 0 {
+		return buckets
+	}
+	filtered := make([]AntigravityBucket, 0, len(buckets))
+	for _, b := range buckets {
+		if b.Timeframe == "Session" && weeklyExhausted[b.GroupLabel] {
+			continue
+		}
+		filtered = append(filtered, b)
+	}
+	return filtered
 }
