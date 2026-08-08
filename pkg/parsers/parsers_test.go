@@ -202,7 +202,6 @@ func TestClaudeParser_WeeklyExhausted(t *testing.T) {
 	}
 }
 
-
 func TestEmailRedactor(t *testing.T) {
 	redacted := parsers.RedactEmail("Grok CLI (abcdefghij@example.com)")
 	if redacted != "Grok CLI (a***j@example.com)" {

@@ -305,20 +305,25 @@ func fetchClaudeUsage(cookieSource string) models.ProviderUsage {
 		specs = append(specs, windowSpec{label: "Weekly", pct: parsed.Weekly.Used, reset: parsed.Weekly.ResetCountdown, secs: 7 * 24 * 3600})
 	}
 
-	return multiWindow(provider, "claude", name, specs, "healthy", false, false, "", parsed.CostInfo)
+	footer := "Claude Web"
+	return multiWindow(provider, "claude", name, specs, "healthy", false, false, "", footer)
 }
 
 // 2b. Claude OAuth
-func fetchClaudeOAuthUsage(accessToken string) models.ProviderUsage {
+func fetchClaudeOAuthUsage(tokenOpt *credentials.ClaudeToken) models.ProviderUsage {
 	provider := models.Claude
 	name := models.GetDisplayName(provider)
+
+	if tokenOpt == nil || strings.TrimSpace(tokenOpt.AccessToken) == "" {
+		return singleWindow(provider, "claude", name, 0, 100, "N/A", "degraded", false, true, "Missing Claude access token", "")
+	}
 
 	req, err := http.NewRequest("GET", "https://api.anthropic.com/api/oauth/usage", nil)
 	if err != nil {
 		return singleWindow(provider, "claude", name, 0, 100, "N/A", "degraded", false, true, err.Error(), "")
 	}
 	setupHeaders(req)
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(tokenOpt.AccessToken))
 	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 
 	resp, err := httpClient.Do(req)
@@ -343,7 +348,14 @@ func fetchClaudeOAuthUsage(accessToken string) models.ProviderUsage {
 		oauthSpecs = append(oauthSpecs, windowSpec{label: "Weekly", pct: parsed.Weekly.Used, reset: parsed.Weekly.ResetCountdown, secs: 7 * 24 * 3600})
 	}
 
-	return multiWindow(provider, "claude", name, oauthSpecs, "healthy", false, false, "", parsed.CostInfo)
+	footer := "Claude CLI"
+	if tokenOpt.Email != "" {
+		footer = fmt.Sprintf("Claude CLI (%s)", tokenOpt.Email)
+	} else if tokenOpt.SubscriptionType != "" {
+		footer = fmt.Sprintf("Claude CLI (%s)", strings.Title(tokenOpt.SubscriptionType))
+	}
+
+	return multiWindow(provider, "claude", name, oauthSpecs, "healthy", false, false, "", footer)
 }
 
 // 3. DeepSeek
@@ -475,6 +487,33 @@ func fetchGeminiUsage() models.ProviderUsage {
 	return singleWindow(provider, "gemini", name, 0, 100, "N/A", "degraded", false, true, fmt.Sprintf("Quota API returned status %d", resp.StatusCode), "")
 }
 
+func fetchAntigravityEmail(accessToken string) string {
+	if strings.TrimSpace(accessToken) == "" {
+		return ""
+	}
+	req, err := http.NewRequest("GET", "https://www.googleapis.com/oauth2/v1/userinfo", nil)
+	if err != nil {
+		return ""
+	}
+	setupHeaders(req)
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
+
+	resp, err := httpClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var info struct {
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(body, &info); err == nil && info.Email != "" {
+		return info.Email
+	}
+	return ""
+}
+
 // 6. Antigravity Usage
 func fetchAntigravityUsage() models.ProviderUsage {
 	provider := models.Antigravity
@@ -563,8 +602,12 @@ func fetchAntigravityUsage() models.ProviderUsage {
 		}
 
 		accountLabel := token.AuthMethod
-		if token.Email != "" {
-			accountLabel = fmt.Sprintf("%s, %s", token.Email, token.AuthMethod)
+		email := token.Email
+		if email == "" && token.AccessToken != "" {
+			email = fetchAntigravityEmail(token.AccessToken)
+		}
+		if email != "" {
+			accountLabel = fmt.Sprintf("%s, %s", email, token.AuthMethod)
 		}
 
 		groupPlural := "s"
@@ -882,11 +925,11 @@ func Fetch(cfg models.ProviderConfig) models.ProviderUsage {
 		}
 		_ = credentials.EnsureTokenReady(models.Claude)
 		if t, err := credentials.LoadClaudeToken(); err == nil && strings.TrimSpace(t.AccessToken) != "" {
-			res := fetchClaudeOAuthUsage(t.AccessToken)
+			res := fetchClaudeOAuthUsage(t)
 			if res.HasError && (strings.Contains(res.ErrorMessage, "401") || strings.Contains(res.ErrorMessage, "Unauthorized")) {
 				if credentials.ForceRefreshViaCliHeadless(models.Claude) {
 					if freshToken, err := credentials.LoadClaudeToken(); err == nil && strings.TrimSpace(freshToken.AccessToken) != "" {
-						return fetchClaudeOAuthUsage(freshToken.AccessToken)
+						return fetchClaudeOAuthUsage(freshToken)
 					}
 				}
 			}

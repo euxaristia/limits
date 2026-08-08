@@ -53,22 +53,36 @@ func parseAntigravityTokenJSON(data []byte) (*Token, error) {
 	}
 
 	var email string
-	if idToken, ok := root["id_token"].(string); ok && idToken != "" {
-		parts := strings.Split(idToken, ".")
-		if len(parts) >= 2 {
-			payloadBase64 := parts[1]
-			payloadBase64 = strings.ReplaceAll(payloadBase64, "-", "+")
-			payloadBase64 = strings.ReplaceAll(payloadBase64, "_", "/")
-			switch len(payloadBase64) % 4 {
-			case 2:
-				payloadBase64 += "=="
-			case 3:
-				payloadBase64 += "="
-			}
-			if decoded, err := base64.StdEncoding.DecodeString(payloadBase64); err == nil {
-				var payloadMap map[string]interface{}
-				if err := json.Unmarshal(decoded, &payloadMap); err == nil {
-					email, _ = payloadMap["email"].(string)
+	if e, ok := root["email"].(string); ok && e != "" {
+		email = e
+	} else if e, ok := tokenMap["email"].(string); ok && e != "" {
+		email = e
+	} else if e, ok := root["user_email"].(string); ok && e != "" {
+		email = e
+	} else if e, ok := tokenMap["user_email"].(string); ok && e != "" {
+		email = e
+	} else {
+		idToken, _ := root["id_token"].(string)
+		if idToken == "" {
+			idToken, _ = tokenMap["id_token"].(string)
+		}
+		if idToken != "" {
+			parts := strings.Split(idToken, ".")
+			if len(parts) >= 2 {
+				payloadBase64 := parts[1]
+				payloadBase64 = strings.ReplaceAll(payloadBase64, "-", "+")
+				payloadBase64 = strings.ReplaceAll(payloadBase64, "_", "/")
+				switch len(payloadBase64) % 4 {
+				case 2:
+					payloadBase64 += "=="
+				case 3:
+					payloadBase64 += "="
+				}
+				if decoded, err := base64.StdEncoding.DecodeString(payloadBase64); err == nil {
+					var payloadMap map[string]interface{}
+					if err := json.Unmarshal(decoded, &payloadMap); err == nil {
+						email, _ = payloadMap["email"].(string)
+					}
 				}
 			}
 		}
@@ -258,8 +272,10 @@ func IsGrokWorking() bool {
 }
 
 type ClaudeToken struct {
-	AccessToken string
-	ExpiresAt   *time.Time
+	AccessToken      string
+	ExpiresAt        *time.Time
+	Email            string
+	SubscriptionType string
 }
 
 // CodexToken is the ChatGPT session recorded by the Codex CLI after `codex login`.
@@ -353,9 +369,20 @@ func LoadClaudeToken() (*ClaudeToken, error) {
 		}
 	}
 
+	email, _ := oauthMap["email"].(string)
+	if email == "" {
+		email, _ = root["email"].(string)
+	}
+	subType, _ := oauthMap["subscriptionType"].(string)
+	if subType == "" {
+		subType, _ = root["subscriptionType"].(string)
+	}
+
 	return &ClaudeToken{
-		AccessToken: token,
-		ExpiresAt:   expiresAt,
+		AccessToken:      token,
+		ExpiresAt:        expiresAt,
+		Email:            email,
+		SubscriptionType: subType,
 	}, nil
 }
 
