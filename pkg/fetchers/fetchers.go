@@ -17,6 +17,8 @@ import (
 	"github.com/euxaristia/limits/pkg/credentials"
 	"github.com/euxaristia/limits/pkg/models"
 	"github.com/euxaristia/limits/pkg/parsers"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 var httpClient = &http.Client{
@@ -329,10 +331,13 @@ func fetchClaudeProfileEmail(accessToken string) string {
 	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 
 	resp, err := httpClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
 
 	body, _ := io.ReadAll(resp.Body)
 	var root struct {
@@ -392,7 +397,7 @@ func fetchClaudeOAuthUsage(tokenOpt *credentials.ClaudeToken) models.ProviderUsa
 
 	subType := tokenOpt.SubscriptionType
 	if subType != "" {
-		subType = strings.Title(subType)
+		subType = cases.Title(language.Und, cases.NoLower).String(subType)
 	}
 
 	footer := "Claude CLI"
@@ -548,10 +553,13 @@ func fetchAntigravityEmail(accessToken string) string {
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
 
 	resp, err := httpClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
 
 	body, _ := io.ReadAll(resp.Body)
 	var info struct {
@@ -883,10 +891,13 @@ func fetchGitHubUserEmail(bearer string) string {
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(bearer))
 
 	resp, err := httpClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
 
 	body, _ := io.ReadAll(resp.Body)
 	var u struct {

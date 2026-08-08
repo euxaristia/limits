@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/euxaristia/limits/pkg/models"
@@ -109,5 +110,20 @@ func TestSortResultsByUsage_ExhaustedUnknownResetSortsLast(t *testing.T) {
 	sortResultsByUsage(results)
 	if results[0].ID != "codex" {
 		t.Errorf("expected known sooner reset first, got %s", results[0].ID)
+	}
+}
+
+func TestResetCountdownSecondsRejectsOverflow(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	if seconds, ok := resetCountdownSeconds(strconv.Itoa(maxInt) + "s"); !ok || seconds != maxInt {
+		t.Fatalf("expected maximum int seconds to parse, got %d, %t", seconds, ok)
+	}
+	for _, unit := range []string{"d", "h", "m"} {
+		if _, ok := resetCountdownSeconds(strconv.Itoa(maxInt) + unit); ok {
+			t.Errorf("expected %s conversion overflow to be rejected", unit)
+		}
+	}
+	if _, ok := resetCountdownSeconds(strconv.Itoa(maxInt) + "s 1s"); ok {
+		t.Error("expected cumulative overflow to be rejected")
 	}
 }
