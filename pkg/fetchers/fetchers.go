@@ -309,6 +309,36 @@ func fetchClaudeUsage(cookieSource string) models.ProviderUsage {
 	return multiWindow(provider, "claude", name, specs, "healthy", false, false, "", footer)
 }
 
+func fetchClaudeProfileEmail(accessToken string) string {
+	if strings.TrimSpace(accessToken) == "" {
+		return ""
+	}
+	req, err := http.NewRequest("GET", "https://api.anthropic.com/api/oauth/profile", nil)
+	if err != nil {
+		return ""
+	}
+	setupHeaders(req)
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+
+	resp, err := httpClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var root struct {
+		Account struct {
+			Email string `json:"email"`
+		} `json:"account"`
+	}
+	if err := json.Unmarshal(body, &root); err == nil && root.Account.Email != "" {
+		return root.Account.Email
+	}
+	return ""
+}
+
 // 2b. Claude OAuth
 func fetchClaudeOAuthUsage(tokenOpt *credentials.ClaudeToken) models.ProviderUsage {
 	provider := models.Claude
@@ -348,11 +378,23 @@ func fetchClaudeOAuthUsage(tokenOpt *credentials.ClaudeToken) models.ProviderUsa
 		oauthSpecs = append(oauthSpecs, windowSpec{label: "Weekly", pct: parsed.Weekly.Used, reset: parsed.Weekly.ResetCountdown, secs: 7 * 24 * 3600})
 	}
 
+	email := tokenOpt.Email
+	if email == "" {
+		email = fetchClaudeProfileEmail(tokenOpt.AccessToken)
+	}
+
+	subType := tokenOpt.SubscriptionType
+	if subType != "" {
+		subType = strings.Title(subType)
+	}
+
 	footer := "Claude CLI"
-	if tokenOpt.Email != "" {
-		footer = fmt.Sprintf("Claude CLI (%s)", tokenOpt.Email)
-	} else if tokenOpt.SubscriptionType != "" {
-		footer = fmt.Sprintf("Claude CLI (%s)", strings.Title(tokenOpt.SubscriptionType))
+	if email != "" && subType != "" {
+		footer = fmt.Sprintf("Claude CLI (%s, %s)", email, subType)
+	} else if email != "" {
+		footer = fmt.Sprintf("Claude CLI (%s)", email)
+	} else if subType != "" {
+		footer = fmt.Sprintf("Claude CLI (%s)", subType)
 	}
 
 	return multiWindow(provider, "claude", name, oauthSpecs, "healthy", false, false, "", footer)
