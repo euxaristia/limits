@@ -190,6 +190,19 @@ func TestClaudeParser_TwoBuckets(t *testing.T) {
 	}
 }
 
+func TestClaudeParser_WeeklyExhausted(t *testing.T) {
+	jsonStr := `{
+		"five_hour": { "utilization": 0.0, "resets_at": "2026-07-31T20:00:00Z" },
+		"seven_day": { "utilization": 100.0, "resets_at": "2026-08-05T00:00:00Z" }
+	}`
+
+	r := parsers.ParseClaudeUsage([]byte(jsonStr))
+	if r.CostInfo != "7-day: 100%" {
+		t.Errorf("expected CostInfo '7-day: 100%%', got '%s'", r.CostInfo)
+	}
+}
+
+
 func TestEmailRedactor(t *testing.T) {
 	redacted := parsers.RedactEmail("Grok CLI (abcdefghij@example.com)")
 	if redacted != "Grok CLI (a***j@example.com)" {
