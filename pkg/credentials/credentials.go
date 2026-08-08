@@ -284,6 +284,40 @@ type CodexToken struct {
 	AccessToken string
 	AccountID   string
 	PlanType    string
+	Email       string
+}
+
+func extractEmailFromJWT(jwtStr string) string {
+	parts := strings.Split(jwtStr, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payloadBase64 := parts[1]
+	payloadBase64 = strings.ReplaceAll(payloadBase64, "-", "+")
+	payloadBase64 = strings.ReplaceAll(payloadBase64, "_", "/")
+	switch len(payloadBase64) % 4 {
+	case 2:
+		payloadBase64 += "=="
+	case 3:
+		payloadBase64 += "="
+	}
+	decoded, err := base64.StdEncoding.DecodeString(payloadBase64)
+	if err != nil {
+		return ""
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		return ""
+	}
+	if email, ok := payload["email"].(string); ok && email != "" {
+		return email
+	}
+	if prof, ok := payload["https://api.openai.com/profile"].(map[string]interface{}); ok {
+		if email, ok := prof["email"].(string); ok && email != "" {
+			return email
+		}
+	}
+	return ""
 }
 
 // LoadCodexToken reads the existing Codex CLI login without copying it into limits'
@@ -299,24 +333,44 @@ func LoadCodexToken() (*CodexToken, error) {
 		return nil, err
 	}
 
-	var root struct {
-		Tokens struct {
-			AccessToken string `json:"access_token"`
-			AccountID   string `json:"account_id"`
-			PlanType    string `json:"plan_type"`
-		} `json:"tokens"`
-	}
+	var root map[string]interface{}
 	if err := json.Unmarshal(data, &root); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(root.Tokens.AccessToken) == "" {
+
+	var accessToken, accountID, planType, idToken string
+	if tokens, ok := root["tokens"].(map[string]interface{}); ok {
+		accessToken, _ = tokens["access_token"].(string)
+		accountID, _ = tokens["account_id"].(string)
+		planType, _ = tokens["plan_type"].(string)
+		idToken, _ = tokens["id_token"].(string)
+	}
+
+	if strings.TrimSpace(accessToken) == "" {
 		return nil, errors.New("missing Codex ChatGPT access token")
 	}
 
+	var email string
+	if e, ok := root["email"].(string); ok && e != "" {
+		email = e
+	} else if tokens, ok := root["tokens"].(map[string]interface{}); ok {
+		if e, ok := tokens["email"].(string); ok && e != "" {
+			email = e
+		}
+	}
+
+	if email == "" && idToken != "" {
+		email = extractEmailFromJWT(idToken)
+	}
+	if email == "" && accessToken != "" {
+		email = extractEmailFromJWT(accessToken)
+	}
+
 	return &CodexToken{
-		AccessToken: root.Tokens.AccessToken,
-		AccountID:   root.Tokens.AccountID,
-		PlanType:    root.Tokens.PlanType,
+		AccessToken: accessToken,
+		AccountID:   accountID,
+		PlanType:    planType,
+		Email:       email,
 	}, nil
 }
 func LoadClaudeToken() (*ClaudeToken, error) {

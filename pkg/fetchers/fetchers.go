@@ -189,8 +189,15 @@ func fetchCodexUsage() models.ProviderUsage {
 		specs[i] = windowSpec{label: window.Label, pct: window.UsedPercent, reset: window.ResetCountdown, secs: window.WindowSeconds}
 	}
 	footer := "ChatGPT"
-	if usage.PlanType != "" {
-		footer += " " + usage.PlanType
+	plan := usage.PlanType
+	if plan == "" {
+		plan = token.PlanType
+	}
+	if plan != "" {
+		footer += " " + plan
+	}
+	if token.Email != "" {
+		footer = fmt.Sprintf("%s (%s)", footer, token.Email)
 	}
 	return multiWindow(provider, "codex", name, specs, "healthy", false, false, "", footer)
 }
@@ -864,6 +871,33 @@ func (q copilotQuota) usedOf() (float64, float64) {
 	return pct, math.Max(0.0, used)
 }
 
+func fetchGitHubUserEmail(bearer string) string {
+	if strings.TrimSpace(bearer) == "" {
+		return ""
+	}
+	req, err := http.NewRequest("GET", "https://api.github.com/user", nil)
+	if err != nil {
+		return ""
+	}
+	setupHeaders(req)
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(bearer))
+
+	resp, err := httpClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	var u struct {
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(body, &u); err == nil && u.Email != "" {
+		return u.Email
+	}
+	return ""
+}
+
 func fetchCopilotUsage(cfg models.ProviderConfig) models.ProviderUsage {
 	provider := models.Copilot
 	name := models.GetDisplayName(provider)
@@ -919,7 +953,11 @@ func fetchCopilotUsage(cfg models.ProviderConfig) models.ProviderUsage {
 		return copilotUnavailable(provider, name, "no quotas reported for this account")
 	}
 
+	email := fetchGitHubUserEmail(bearer)
 	userLabel := payload.Login
+	if email != "" {
+		userLabel = fmt.Sprintf("%s, %s", payload.Login, email)
+	}
 	if userLabel == "" {
 		userLabel = "user"
 	}
