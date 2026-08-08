@@ -12,6 +12,8 @@ import (
 	"github.com/euxaristia/limits/pkg/fetchers"
 	"github.com/euxaristia/limits/pkg/models"
 	"github.com/euxaristia/limits/pkg/terminal"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 const Version = "1.1.0"
@@ -137,18 +139,24 @@ func resetCountdownSeconds(countdown string) (int, bool) {
 		if err != nil || value < 0 {
 			return 0, false
 		}
+		unitSeconds := 0
 		switch field[len(field)-1] {
 		case 'd':
-			total += value * 24 * 60 * 60
+			unitSeconds = 24 * 60 * 60
 		case 'h':
-			total += value * 60 * 60
+			unitSeconds = 60 * 60
 		case 'm':
-			total += value * 60
+			unitSeconds = 60
 		case 's':
-			total += value
+			unitSeconds = 1
 		default:
 			return 0, false
 		}
+		maxInt := int(^uint(0) >> 1)
+		if value > (maxInt-total)/unitSeconds {
+			return 0, false
+		}
+		total += value * unitSeconds
 	}
 	return total, true
 }
@@ -350,7 +358,7 @@ func listProviders() {
 		providerEnum := models.ProviderFromString(p.ID)
 		displayName := models.GetDisplayName(providerEnum)
 		if displayName == "Unknown" {
-			displayName = strings.Title(p.ID)
+			displayName = cases.Title(language.Und, cases.NoLower).String(p.ID)
 		}
 		isEnabled := p.IsEnabled()
 
