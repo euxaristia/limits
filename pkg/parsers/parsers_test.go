@@ -150,6 +150,31 @@ func TestAntigravityParser_FallbackSessionOrderedBeforeWeekly(t *testing.T) {
 	}
 }
 
+func TestAntigravityParser_HidesSessionWhenWeeklyExhausted(t *testing.T) {
+	weeklyReset := time.Now().UTC().Add(1 * time.Hour).Format(time.RFC3339)
+	sessionReset := time.Now().UTC().Add(5 * time.Hour).Format(time.RFC3339)
+	jsonStr := fmt.Sprintf(`{
+		"groups": [
+			{
+				"displayName": "Claude & GPT",
+				"description": "Claude and GPT models",
+				"buckets": [
+					{ "remainingFraction": 0.0, "resetTime": "%s", "window": "weekly" },
+					{ "remainingFraction": 0.5, "resetTime": "%s", "window": "5h" }
+				]
+			}
+		]
+	}`, weeklyReset, sessionReset)
+
+	r := parsers.ParseAntigravityQuota([]byte(jsonStr))
+	if len(r) != 1 {
+		t.Fatalf("expected 1 bucket (session hidden), got %d", len(r))
+	}
+	if r[0].Timeframe != "Weekly" {
+		t.Errorf("expected remaining bucket to be Weekly, got %s", r[0].Timeframe)
+	}
+}
+
 func TestClaudeParser_TwoBuckets(t *testing.T) {
 	jsonStr := `{
 		"five_hour": { "utilization": 45.0, "resets_at": "2026-07-31T20:00:00Z" },
