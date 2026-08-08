@@ -56,13 +56,13 @@ func TestSortResultsByUsage_DemotesExhaustedProviders(t *testing.T) {
 	grok := models.ProviderUsage{
 		ID: "GrOk",
 		Windows: []models.UsageWindow{
-			{Label: "Weekly", UsedPercent: 100.0},
+			{Label: "Weekly", UsedPercent: 100.0, ResetCountdown: "3d 2h"},
 		},
 	}
 	codex := models.ProviderUsage{
 		ID: "CoDeX",
 		Windows: []models.UsageWindow{
-			{Label: "Primary", UsedPercent: 100.0},
+			{Label: "Primary", UsedPercent: 100.0, ResetCountdown: "1h 30m"},
 		},
 	}
 	antigravity := models.ProviderUsage{
@@ -93,10 +93,21 @@ func TestSortResultsByUsage_DemotesExhaustedProviders(t *testing.T) {
 
 	// Usable providers (claude, antigravity, copilot) should come first in priority order,
 	// demoting exhausted providers (grok, codex) to the bottom.
-	expectedOrder := []string{"ClAuDe", "AnTiGrAvItY", "CoPiLoT", "GrOk", "CoDeX"}
+	expectedOrder := []string{"ClAuDe", "AnTiGrAvItY", "CoPiLoT", "CoDeX", "GrOk"}
 	for i, want := range expectedOrder {
 		if results[i].ID != want {
 			t.Errorf("at index %d: expected %s, got %s", i, want, results[i].ID)
 		}
+	}
+}
+
+func TestSortResultsByUsage_ExhaustedUnknownResetSortsLast(t *testing.T) {
+	results := []models.ProviderUsage{
+		{ID: "grok", Windows: []models.UsageWindow{{UsedPercent: 100, ResetCountdown: "Unknown"}}},
+		{ID: "codex", Windows: []models.UsageWindow{{UsedPercent: 100, ResetCountdown: "Resets now"}}},
+	}
+	sortResultsByUsage(results)
+	if results[0].ID != "codex" {
+		t.Errorf("expected known sooner reset first, got %s", results[0].ID)
 	}
 }

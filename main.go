@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/euxaristia/limits/pkg/config"
@@ -118,12 +119,69 @@ func isExhausted(u models.ProviderUsage) bool {
 	return true
 }
 
+func resetCountdownSeconds(countdown string) (int, bool) {
+	countdown = strings.TrimSpace(countdown)
+	if strings.EqualFold(countdown, "Resets now") {
+		return 0, true
+	}
+	total := 0
+	fields := strings.Fields(countdown)
+	if len(fields) == 0 {
+		return 0, false
+	}
+	for _, field := range fields {
+		if len(field) < 2 {
+			return 0, false
+		}
+		value, err := strconv.Atoi(field[:len(field)-1])
+		if err != nil || value < 0 {
+			return 0, false
+		}
+		switch field[len(field)-1] {
+		case 'd':
+			total += value * 24 * 60 * 60
+		case 'h':
+			total += value * 60 * 60
+		case 'm':
+			total += value * 60
+		case 's':
+			total += value
+		default:
+			return 0, false
+		}
+	}
+	return total, true
+}
+
+func earliestResetSeconds(u models.ProviderUsage) (int, bool) {
+	earliest := 0
+	found := false
+	for _, window := range u.Windows {
+		seconds, ok := resetCountdownSeconds(window.ResetCountdown)
+		if ok && (!found || seconds < earliest) {
+			earliest = seconds
+			found = true
+		}
+	}
+	return earliest, found
+}
+
 func sortResultsByUsage(results []models.ProviderUsage) {
 	sort.SliceStable(results, func(i, j int) bool {
 		iExhausted := isExhausted(results[i])
 		jExhausted := isExhausted(results[j])
 		if iExhausted != jExhausted {
 			return !iExhausted
+		}
+		if iExhausted {
+			iReset, iHasReset := earliestResetSeconds(results[i])
+			jReset, jHasReset := earliestResetSeconds(results[j])
+			if iHasReset != jHasReset {
+				return iHasReset
+			}
+			if iHasReset && iReset != jReset {
+				return iReset < jReset
+			}
 		}
 
 		ri, iOk := getPriorityRank(results[i].ID)
