@@ -91,7 +91,11 @@ func ParseClaudeUsage(data []byte) ClaudeParseResult {
 
 	costInfo := primaryLabel
 	if session.HasData && weekly.HasData {
-		costInfo = fmt.Sprintf("Session: %g%% · 7-day: %g%%", sessionPct, weeklyPct)
+		if weekly.Used >= 100.0 {
+			costInfo = fmt.Sprintf("7-day: %g%%", weeklyPct)
+		} else {
+			costInfo = fmt.Sprintf("Session: %g%% · 7-day: %g%%", sessionPct, weeklyPct)
+		}
 	}
 
 	res := ClaudeParseResult{
