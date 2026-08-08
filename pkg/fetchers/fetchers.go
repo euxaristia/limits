@@ -297,7 +297,8 @@ func fetchClaudeUsage(cookieSource string) models.ProviderUsage {
 	parsed := parsers.ParseClaudeUsage(usageBody)
 
 	var specs []windowSpec
-	if parsed.Session != nil {
+	weeklyExhausted := parsed.Weekly != nil && parsed.Weekly.Used >= 100.0
+	if parsed.Session != nil && !weeklyExhausted {
 		specs = append(specs, windowSpec{label: "Session", pct: parsed.Session.Used, reset: parsed.Session.ResetCountdown, secs: 5 * 3600})
 	}
 	if parsed.Weekly != nil {
@@ -333,15 +334,16 @@ func fetchClaudeOAuthUsage(accessToken string) models.ProviderUsage {
 	body, _ := io.ReadAll(resp.Body)
 	parsed := parsers.ParseClaudeUsage(body)
 
-	var specs []windowSpec
-	if parsed.Session != nil {
-		specs = append(specs, windowSpec{label: "Session", pct: parsed.Session.Used, reset: parsed.Session.ResetCountdown, secs: 5 * 3600})
+	var oauthSpecs []windowSpec
+	oauthWeeklyExhausted := parsed.Weekly != nil && parsed.Weekly.Used >= 100.0
+	if parsed.Session != nil && !oauthWeeklyExhausted {
+		oauthSpecs = append(oauthSpecs, windowSpec{label: "Session", pct: parsed.Session.Used, reset: parsed.Session.ResetCountdown, secs: 5 * 3600})
 	}
 	if parsed.Weekly != nil {
-		specs = append(specs, windowSpec{label: "Weekly", pct: parsed.Weekly.Used, reset: parsed.Weekly.ResetCountdown, secs: 7 * 24 * 3600})
+		oauthSpecs = append(oauthSpecs, windowSpec{label: "Weekly", pct: parsed.Weekly.Used, reset: parsed.Weekly.ResetCountdown, secs: 7 * 24 * 3600})
 	}
 
-	return multiWindow(provider, "claude", name, specs, "healthy", false, false, "", parsed.CostInfo)
+	return multiWindow(provider, "claude", name, oauthSpecs, "healthy", false, false, "", parsed.CostInfo)
 }
 
 // 3. DeepSeek
@@ -880,7 +882,15 @@ func Fetch(cfg models.ProviderConfig) models.ProviderUsage {
 		}
 		_ = credentials.EnsureTokenReady(models.Claude)
 		if t, err := credentials.LoadClaudeToken(); err == nil && strings.TrimSpace(t.AccessToken) != "" {
-			return fetchClaudeOAuthUsage(t.AccessToken)
+			res := fetchClaudeOAuthUsage(t.AccessToken)
+			if res.HasError && (strings.Contains(res.ErrorMessage, "401") || strings.Contains(res.ErrorMessage, "Unauthorized")) {
+				if credentials.ForceRefreshViaCliHeadless(models.Claude) {
+					if freshToken, err := credentials.LoadClaudeToken(); err == nil && strings.TrimSpace(freshToken.AccessToken) != "" {
+						return fetchClaudeOAuthUsage(freshToken.AccessToken)
+					}
+				}
+			}
+			return res
 		}
 		return GetUnconfiguredData(provider)
 	case models.DeepSeek:
