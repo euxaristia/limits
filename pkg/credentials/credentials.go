@@ -338,6 +338,8 @@ func LoadClaudeToken() (*ClaudeToken, error) {
 		if s, ok := expVal.(string); ok {
 			if t, err := time.Parse(time.RFC3339, s); err == nil {
 				expiresAt = &t
+			} else if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+				expiresAt = &t
 			}
 		} else if num, ok := expVal.(float64); ok {
 			unixVal := int64(num)
@@ -540,7 +542,11 @@ func getCliCandidates(provider models.UsageProvider) []candidate {
 			{cli: "antigravity", args: []string{"models"}},
 		}
 	case models.Claude:
+		// "auth status" probes Anthropic auth servers and forces Claude Code CLI to
+		// refresh expired OAuth tokens in ~/.claude/.credentials.json. "--version" is an
+		// offline fallback.
 		return []candidate{
+			{cli: "claude", args: []string{"auth", "status"}},
 			{cli: "claude", args: []string{"--version"}},
 		}
 	case models.Gemini:

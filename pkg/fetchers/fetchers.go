@@ -880,7 +880,15 @@ func Fetch(cfg models.ProviderConfig) models.ProviderUsage {
 		}
 		_ = credentials.EnsureTokenReady(models.Claude)
 		if t, err := credentials.LoadClaudeToken(); err == nil && strings.TrimSpace(t.AccessToken) != "" {
-			return fetchClaudeOAuthUsage(t.AccessToken)
+			res := fetchClaudeOAuthUsage(t.AccessToken)
+			if res.HasError && (strings.Contains(res.ErrorMessage, "401") || strings.Contains(res.ErrorMessage, "Unauthorized")) {
+				if credentials.ForceRefreshViaCliHeadless(models.Claude) {
+					if freshToken, err := credentials.LoadClaudeToken(); err == nil && strings.TrimSpace(freshToken.AccessToken) != "" {
+						return fetchClaudeOAuthUsage(freshToken.AccessToken)
+					}
+				}
+			}
+			return res
 		}
 		return GetUnconfiguredData(provider)
 	case models.DeepSeek:
