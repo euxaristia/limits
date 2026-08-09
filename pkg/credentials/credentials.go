@@ -610,9 +610,10 @@ type candidate struct {
 func getCliCandidates(provider models.UsageProvider) []candidate {
 	switch provider {
 	case models.Grok:
+		// "models" calls an authenticated endpoint and refreshes an expired
+		// session. Static commands such as "--version" never touch auth state.
 		return []candidate{
-			{cli: "grok", args: []string{"--version"}},
-			{cli: "grok", args: []string{"auth", "status"}},
+			{cli: "grok", args: []string{"models"}},
 		}
 	case models.Antigravity:
 		// "--version" is a static local print that never touches the keyring or
@@ -650,7 +651,9 @@ func ForceRefreshViaCliHeadless(provider models.UsageProvider) bool {
 	for _, c := range candidates {
 		if IsCliAvailable(c.cli) {
 			_ = RunCliHeadless(c.cli, c.args, 10.0)
-			return IsTokenWorking(provider)
+			if IsTokenWorking(provider) {
+				return true
+			}
 		}
 	}
 	return false
