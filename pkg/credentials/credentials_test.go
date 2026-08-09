@@ -27,6 +27,18 @@ func TestGetCliCandidatesClaude(t *testing.T) {
 	}
 }
 
+func TestGetCliCandidatesGrok(t *testing.T) {
+	candidates := getCliCandidates(models.Grok)
+	if len(candidates) != 1 {
+		t.Fatalf("expected one Grok refresh candidate, got %v", candidates)
+	}
+
+	candidate := candidates[0]
+	if candidate.cli != "grok" || len(candidate.args) != 1 || candidate.args[0] != "models" {
+		t.Errorf("expected authenticated Grok models probe, got %v", candidate)
+	}
+}
+
 func TestLoadClaudeTokenAndIsWorking(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "claude_test_*")
 	if err != nil {
