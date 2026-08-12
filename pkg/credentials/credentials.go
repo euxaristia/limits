@@ -624,12 +624,13 @@ func getCliCandidates(provider models.UsageProvider) []candidate {
 			{cli: "antigravity", args: []string{"models"}},
 		}
 	case models.Claude:
-		// "auth status" probes Anthropic auth servers and forces Claude Code CLI to
-		// refresh expired OAuth tokens in ~/.claude/.credentials.json. "--version" is an
-		// offline fallback.
+		// "doctor" resolves the account, which makes Claude Code refresh an expired
+		// OAuth token in ~/.claude/.credentials.json as a side effect. "mcp list"
+		// refreshes the same way and serves as a fallback. Commands that only read
+		// local state ("auth status", "--version", "agents") never refresh.
 		return []candidate{
-			{cli: "claude", args: []string{"auth", "status"}},
-			{cli: "claude", args: []string{"--version"}},
+			{cli: "claude", args: []string{"doctor"}},
+			{cli: "claude", args: []string{"mcp", "list"}},
 		}
 	case models.Gemini:
 		return []candidate{
