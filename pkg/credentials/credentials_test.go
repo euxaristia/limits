@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -18,15 +19,30 @@ func TestGetCliCandidatesClaude(t *testing.T) {
 		t.Fatalf("expected candidates for Claude, got none")
 	}
 
-	foundAuthStatus := false
+	foundDoctor := false
 	for _, c := range candidates {
-		if c.cli == "claude" && len(c.args) >= 2 && c.args[0] == "auth" && c.args[1] == "status" {
-			foundAuthStatus = true
+		if c.cli == "claude" && len(c.args) == 1 && c.args[0] == "doctor" {
+			foundDoctor = true
 			break
 		}
 	}
-	if !foundAuthStatus {
-		t.Errorf("expected candidate {cli: \"claude\", args: [\"auth\", \"status\"]}, got %v", candidates)
+	if !foundDoctor {
+		t.Errorf("expected authenticated Claude doctor probe, got %v", candidates)
+	}
+
+	// These commands only read local state. Running one leaves an expired token
+	// expired, so a refresh candidate list containing one is silently useless.
+	nonRefreshing := [][]string{
+		{"auth", "status"},
+		{"--version"},
+		{"agents", "--json"},
+	}
+	for _, c := range candidates {
+		for _, bad := range nonRefreshing {
+			if c.cli == "claude" && slices.Equal(c.args, bad) {
+				t.Errorf("candidate %v cannot refresh an expired token", c)
+			}
+		}
 	}
 }
 
@@ -127,8 +143,8 @@ func TestForceRefreshViaCliHeadlessCandidateValidation(t *testing.T) {
 	}
 
 	// Create a single fake claude executable that models both candidates:
-	// "claude auth status" runs but does not refresh the token (first candidate),
-	// "claude --version" writes a fresh token (second candidate). It also
+	// "claude doctor" runs but does not refresh the token (first candidate),
+	// "claude mcp list" writes a fresh token (second candidate). It also
 	// appends each invocation to a call log so the test can prove both ran.
 	claudeCLI := filepath.Join(cliDir, "claude"+exeSuffix())
 	freshTime := time.Now().Add(24 * time.Hour).Format(time.RFC3339Nano)
@@ -153,8 +169,8 @@ func main() {
 		}
 	}
 	args := os.Args[1:]
-	if len(args) == 0 || args[0] != "--version" {
-		// First candidate: auth status. Run without refreshing the token.
+	if len(args) == 0 || args[0] != "mcp" {
+		// First candidate: doctor. Run without refreshing the token.
 		os.Exit(0)
 	}
 	// Second candidate: write a fresh token.
@@ -187,8 +203,8 @@ func main() {
 		t.Fatal("expected IsClaudeWorking() to return false for expired token")
 	}
 
-	// Call ForceRefreshViaCliHeadless - should try "claude auth status" first
-	// (token stays expired, loop continues), then "claude --version" (refreshes token).
+	// Call ForceRefreshViaCliHeadless - should try "claude doctor" first
+	// (token stays expired, loop continues), then "claude mcp list" (refreshes token).
 	result := ForceRefreshViaCliHeadless(models.Claude)
 	if !result {
 		t.Fatal("expected ForceRefreshViaCliHeadless to return true after second candidate refreshes token")
@@ -215,7 +231,7 @@ func main() {
 		t.Fatalf("expected call log to be written: %v", err)
 	}
 	got := string(callLog)
-	want := "auth status\n--version\n"
+	want := "doctor\nmcp list\n"
 	if got != want {
 		t.Errorf("expected candidates checked in order %q, got %q", want, got)
 	}
