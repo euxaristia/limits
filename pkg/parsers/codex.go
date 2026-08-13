@@ -36,15 +36,26 @@ func ParseCodexUsage(data []byte, now time.Time) (CodexUsage, error) {
 
 	windows := make([]CodexUsageWindow, 0, 2)
 	if window := payload.RateLimit.PrimaryWindow; window != nil {
-		windows = append(windows, window.toUsageWindow("Primary", now))
+		windows = append(windows, window.toUsageWindow(windowLabel("Primary", window.LimitWindowSeconds), now))
 	}
 	if window := payload.RateLimit.SecondaryWindow; window != nil {
-		windows = append(windows, window.toUsageWindow("Secondary", now))
+		windows = append(windows, window.toUsageWindow(windowLabel("Secondary", window.LimitWindowSeconds), now))
 	}
 	if len(windows) == 0 {
 		return CodexUsage{}, fmt.Errorf("no Codex rate-limit windows in response")
 	}
 	return CodexUsage{PlanType: payload.PlanType, Windows: windows}, nil
+}
+
+func windowLabel(fallback string, seconds int) string {
+	switch seconds {
+	case 5 * 60 * 60:
+		return "Session"
+	case 7 * 24 * 60 * 60:
+		return "Weekly"
+	default:
+		return fallback
+	}
 }
 
 type codexWindow struct {
