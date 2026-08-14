@@ -2,7 +2,7 @@
 //! Claude Code CLI authenticates against. Both return the same shape.
 
 use crate::model::UsageWindow;
-use crate::time::{DAY, HOUR, format_countdown};
+use crate::time::{DAY, HOUR, format_countdown, format_duration};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -22,8 +22,15 @@ struct Bucket {
 impl Bucket {
     fn into_window(self, label: &str, seconds: i64) -> UsageWindow {
         let countdown = match self.resets_at.as_deref().map(str::trim) {
-            None | Some("") => "Unknown".to_string(),
-            Some(at) => format_countdown(at),
+            None | Some("") => format_duration(seconds),
+            Some(at) => {
+                let parsed = format_countdown(at);
+                if parsed == "Unknown" {
+                    format_duration(seconds)
+                } else {
+                    parsed
+                }
+            }
         };
         UsageWindow::new(label, self.utilization.unwrap_or(0.0))
             .reset(countdown)
@@ -98,18 +105,20 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_reset_time_is_reported_as_unknown() {
+    fn a_missing_reset_time_falls_back_to_window_duration() {
         let windows = parse(r#"{"five_hour":{"utilization":10.0}}"#);
-        assert_eq!(windows[0].reset_countdown, "Unknown");
+        assert_eq!(windows[0].reset_countdown, "5h 0m");
     }
 
     #[test]
     fn null_fields_in_bucket_survive_deserialization() {
-        let windows = parse(r#"{"five_hour":{"utilization":0.0,"resets_at":null},"seven_day":{"utilization":99.0,"resets_at":"2026-08-18T10:59:59.644698+00:00"}}"#);
+        let windows = parse(
+            r#"{"five_hour":{"utilization":0.0,"resets_at":null},"seven_day":{"utilization":99.0,"resets_at":"2026-08-18T10:59:59.644698+00:00"}}"#,
+        );
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].label, "Session");
         assert_eq!(windows[0].used_percent, 0.0);
-        assert_eq!(windows[0].reset_countdown, "Unknown");
+        assert_eq!(windows[0].reset_countdown, "5h 0m");
         assert_eq!(windows[1].label, "Weekly");
         assert_eq!(windows[1].used_percent, 99.0);
     }

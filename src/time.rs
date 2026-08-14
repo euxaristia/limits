@@ -143,6 +143,11 @@ pub fn format_countdown(timestamp: &str) -> String {
     }
 }
 
+/// Format a duration in seconds as a countdown string (e.g. `5h 0m`, `7d 0h`, `45m`).
+pub fn format_duration(seconds: i64) -> String {
+    countdown_between(seconds, 0)
+}
+
 /// Turn a countdown string back into seconds.
 ///
 /// Used only for ordering exhausted providers by who frees up first, so an
