@@ -192,19 +192,61 @@ pub fn load_codex() -> Option<Token> {
     })
 }
 
-/// The OAuth session Claude Code keeps in `~/.claude/.credentials.json`.
+/// The OAuth session Claude Code keeps in `~/.claude/.credentials.json`,
+/// or the OS keyring entry from cairn-code.
 pub fn load_claude() -> Option<Token> {
-    let root = read_json(&home_dir().join(".claude").join(".credentials.json"))?;
-    let oauth = root.get("claudeAiOauth")?;
+    for (service, account) in [
+        ("cairn-code", "oauth:claude"),
+        ("cairn-code", "claude"),
+        ("claude", "credentials"),
+    ] {
+        if let Some(data) = keyring::read(service, account)
+            && let Ok(value) = serde_json::from_slice::<Value>(&data)
+            && let Some(token) = parse_claude(&value)
+        {
+            return Some(token);
+        }
+    }
 
-    Some(Token {
-        access_token: string_at(oauth, "accessToken")?,
-        refresh_token: string_at(oauth, "refreshToken").unwrap_or_default(),
-        expires_at: expiry_at(oauth, &["expiresAt", "expires_at"]),
-        email: first_string(&[oauth, &root], &["email"]),
-        plan_type: first_string(&[oauth, &root], &["subscriptionType"]),
-        ..Default::default()
-    })
+    let root = read_json(&home_dir().join(".claude").join(".credentials.json"))?;
+    parse_claude(&root)
+}
+
+pub(crate) fn parse_claude(root: &Value) -> Option<Token> {
+    if let Some(oauth) = root.get("claudeAiOauth") {
+        return Some(Token {
+            access_token: string_at(oauth, "accessToken")?,
+            refresh_token: string_at(oauth, "refreshToken").unwrap_or_default(),
+            expires_at: expiry_at(oauth, &["expiresAt", "expires_at"]),
+            email: first_string(&[oauth, root], &["email"]),
+            plan_type: first_string(&[oauth, root], &["subscriptionType"]),
+            ..Default::default()
+        });
+    }
+
+    // Direct OAuth token object (from keyring)
+    if let Some(access_token) =
+        string_at(root, "access_token").or_else(|| string_at(root, "accessToken"))
+    {
+        let refresh_token = string_at(root, "refresh_token")
+            .or_else(|| string_at(root, "refreshToken"))
+            .unwrap_or_default();
+        let mut email = string_at(root, "email").unwrap_or_default();
+        if email.is_empty() {
+            email = email_from_jwt(&access_token);
+        }
+        return Some(Token {
+            access_token,
+            refresh_token,
+            expires_at: expiry_at(root, &["expires_at", "expiresAt"]),
+            email,
+            plan_type: first_string(&[root], &["subscriptionType", "plan_type", "plan"]),
+            auth_method: "oauth".into(),
+            ..Default::default()
+        });
+    }
+
+    None
 }
 
 /// The Google OAuth credentials the Gemini CLI writes.
@@ -218,21 +260,88 @@ pub fn load_gemini() -> Option<Token> {
     })
 }
 
-/// The Grok CLI's `~/.grok/auth.json`, which is a map of account entries.
+/// The Grok / xAI token from the OS keyring (cairn-code device OAuth / API key)
+/// or the Grok CLI's `~/.grok/auth.json`.
 pub fn load_grok() -> Option<Token> {
-    let root = read_json(&home_dir().join(".grok").join("auth.json"))?;
-    let entries = root.as_object()?;
+    for (service, account) in [
+        ("cairn-code", "oauth:xai"),
+        ("cairn-code", "xai"),
+        ("grok", "auth"),
+        ("grok", "oauth:grok"),
+    ] {
+        if let Some(data) = keyring::read(service, account) {
+            if let Ok(value) = serde_json::from_slice::<Value>(&data) {
+                if let Some(token) = parse_grok(&value) {
+                    return Some(token);
+                }
+            } else {
+                let key = String::from_utf8_lossy(&data).trim().to_string();
+                if !key.is_empty() && !key.starts_with('{') {
+                    return Some(Token {
+                        access_token: key,
+                        auth_method: "api_key".into(),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
 
-    entries.values().find_map(|entry| {
-        let access_token = string_at(entry, "key")?;
-        Some(Token {
+    let root = read_json(&home_dir().join(".grok").join("auth.json"))?;
+    parse_grok(&root)
+}
+
+pub(crate) fn parse_grok(root: &Value) -> Option<Token> {
+    // 1. If root is a map of account entries (as in ~/.grok/auth.json):
+    if let Some(entries) = root.as_object()
+        && let Some(token) = entries.values().find_map(parse_grok_entry)
+    {
+        return Some(token);
+    }
+    // 2. Direct token object (as in cairn-code keyring or single entry)
+    parse_grok_entry(root)
+}
+
+fn parse_grok_entry(entry: &Value) -> Option<Token> {
+    // OAuth token format (cairn-code / device OAuth): "access_token"
+    if let Some(access_token) =
+        string_at(entry, "access_token").or_else(|| string_at(entry, "accessToken"))
+    {
+        let refresh_token = string_at(entry, "refresh_token")
+            .or_else(|| string_at(entry, "refreshToken"))
+            .unwrap_or_default();
+        let mut email = string_at(entry, "email").unwrap_or_default();
+        if email.is_empty() {
+            email = email_from_jwt(&access_token);
+        }
+        let id_token = string_at(entry, "id_token").unwrap_or_default();
+        if email.is_empty() && !id_token.is_empty() {
+            email = email_from_jwt(&id_token);
+        }
+        return Some(Token {
+            access_token,
+            refresh_token,
+            email,
+            expires_at: expiry_at(entry, &["expires_at", "expiresAt", "expiry"]),
+            auth_method: string_at(entry, "auth_mode")
+                .or_else(|| string_at(entry, "token_type"))
+                .unwrap_or_else(|| "oauth".into()),
+            ..Default::default()
+        });
+    }
+
+    // CLI format (~/.grok/auth.json): "key"
+    if let Some(access_token) = string_at(entry, "key") {
+        return Some(Token {
             access_token,
             email: string_at(entry, "email").unwrap_or_default(),
-            expires_at: expiry_at(entry, &["expires_at"]),
+            expires_at: expiry_at(entry, &["expires_at", "expiresAt"]),
             auth_method: string_at(entry, "auth_mode").unwrap_or_else(|| "oidc".into()),
             ..Default::default()
-        })
-    })
+        });
+    }
+
+    None
 }
 
 /// Antigravity's OAuth token, from the keyring first and the on-disk stores
@@ -539,6 +648,63 @@ mod tests {
         for bad in ["", "single", "a.!!!.c", "a.YWJj.c"] {
             assert_eq!(email_from_jwt(bad), "");
         }
+    }
+
+    #[test]
+    fn parse_grok_oauth_payload() {
+        let payload = json!({
+            "access_token": "xai-oauth-access-token",
+            "refresh_token": "xai-refresh-token",
+            "token_type": "Bearer",
+            "expires_at": 1786741307,
+            "scopes": ["openid", "profile", "email"]
+        });
+        let token = parse_grok(&payload).unwrap();
+        assert_eq!(token.access_token, "xai-oauth-access-token");
+        assert_eq!(token.refresh_token, "xai-refresh-token");
+        assert_eq!(token.expires_at, Some(1786741307));
+    }
+
+    #[test]
+    fn parse_grok_cli_auth_json_map() {
+        let payload = json!({
+            "account1": {
+                "key": "xai-api-key-test",
+                "email": "grokuser@example.com",
+                "expires_at": 1786741307,
+                "auth_mode": "oidc"
+            }
+        });
+        let token = parse_grok(&payload).unwrap();
+        assert_eq!(token.access_token, "xai-api-key-test");
+        assert_eq!(token.email, "grokuser@example.com");
+        assert_eq!(token.auth_method, "oidc");
+    }
+
+    #[test]
+    fn parse_claude_oauth_direct_and_nested() {
+        let nested = json!({
+            "claudeAiOauth": {
+                "accessToken": "claude-nested-token",
+                "refreshToken": "claude-refresh",
+                "expiresAt": "2026-08-14T21:01:47Z",
+                "email": "user@claude.ai",
+                "subscriptionType": "pro"
+            }
+        });
+        let tok1 = parse_claude(&nested).unwrap();
+        assert_eq!(tok1.access_token, "claude-nested-token");
+        assert_eq!(tok1.email, "user@claude.ai");
+
+        let direct = json!({
+            "access_token": "claude-direct-token",
+            "refresh_token": "claude-direct-refresh",
+            "expires_at": 1786741307,
+            "subscriptionType": "max"
+        });
+        let tok2 = parse_claude(&direct).unwrap();
+        assert_eq!(tok2.access_token, "claude-direct-token");
+        assert_eq!(tok2.plan_type, "max");
     }
 
     #[test]
