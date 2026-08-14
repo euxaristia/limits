@@ -14,18 +14,18 @@ struct Payload {
 #[derive(Debug, Deserialize)]
 struct Bucket {
     #[serde(default)]
-    utilization: f64,
+    utilization: Option<f64>,
     #[serde(default)]
-    resets_at: String,
+    resets_at: Option<String>,
 }
 
 impl Bucket {
     fn into_window(self, label: &str, seconds: i64) -> UsageWindow {
-        let countdown = match self.resets_at.trim() {
-            "" => "Unknown".to_string(),
-            at => format_countdown(at),
+        let countdown = match self.resets_at.as_deref().map(str::trim) {
+            None | Some("") => "Unknown".to_string(),
+            Some(at) => format_countdown(at),
         };
-        UsageWindow::new(label, self.utilization)
+        UsageWindow::new(label, self.utilization.unwrap_or(0.0))
             .reset(countdown)
             .seconds(seconds)
     }
@@ -101,6 +101,17 @@ mod tests {
     fn a_missing_reset_time_is_reported_as_unknown() {
         let windows = parse(r#"{"five_hour":{"utilization":10.0}}"#);
         assert_eq!(windows[0].reset_countdown, "Unknown");
+    }
+
+    #[test]
+    fn null_fields_in_bucket_survive_deserialization() {
+        let windows = parse(r#"{"five_hour":{"utilization":0.0,"resets_at":null},"seven_day":{"utilization":99.0,"resets_at":"2026-08-18T10:59:59.644698+00:00"}}"#);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "Session");
+        assert_eq!(windows[0].used_percent, 0.0);
+        assert_eq!(windows[0].reset_countdown, "Unknown");
+        assert_eq!(windows[1].label, "Weekly");
+        assert_eq!(windows[1].used_percent, 99.0);
     }
 
     #[test]
