@@ -193,8 +193,14 @@ pub fn load_codex() -> Option<Token> {
 }
 
 /// The OAuth session Claude Code keeps in `~/.claude/.credentials.json`,
-/// or the OS keyring entry from cairn-code.
+/// falling back to the OS keyring entry from cairn-code if absent.
 pub fn load_claude() -> Option<Token> {
+    if let Some(root) = read_json(&home_dir().join(".claude").join(".credentials.json"))
+        && let Some(token) = parse_claude(&root)
+    {
+        return Some(token);
+    }
+
     for (service, account) in [
         ("cairn-code", "oauth:claude"),
         ("cairn-code", "claude"),
@@ -208,8 +214,7 @@ pub fn load_claude() -> Option<Token> {
         }
     }
 
-    let root = read_json(&home_dir().join(".claude").join(".credentials.json"))?;
-    parse_claude(&root)
+    None
 }
 
 pub(crate) fn parse_claude(root: &Value) -> Option<Token> {
