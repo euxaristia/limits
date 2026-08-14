@@ -29,36 +29,35 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v7
 
-      - name: Setup Go
-        uses: actions/setup-go@v7
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          go-version-file: go.mod
-          # The module has no external dependencies, so there is no go.sum
-          # for the built-in cache to key on.
-          cache: false
+          components: rustfmt, clippy
 
-      # Windows checkouts rewrite the repo's LF endings to CRLF, which gofmt
-      # reports as unformatted, so this check only runs on Linux.
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Check Formatting
-        if: matrix.os == 'ubuntu-latest'
-        shell: bash
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "These files need gofmt:"
-            echo "$unformatted"
-            exit 1
-          fi
+        run: cargo fmt --check
 
-      - name: Vet
-        run: go vet ./...
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Run Unit Tests
-        run: go test ./... -v
+      - name: Run Tests
+        run: cargo test --all-features
 
       - name: Build limits Binary
         shell: bash
-        run: go build -o "dist/limits${{ matrix.ext }}" .
+        run: |
+          cargo build --release --all-features
+          mkdir -p dist
+          cp "target/release/limits${{ matrix.ext }}" "dist/limits${{ matrix.ext }}"
 
       - name: Upload Binary Artifact
         uses: actions/upload-artifact@v7

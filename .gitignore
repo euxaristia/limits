@@ -54,7 +54,10 @@ _ReSharper*/
 Generated\ Files/
 *_wpftmp.csproj
 
-# Go binaries
+# Rust
+/target/
+
+# limits binaries
 /limits
 /limits.exe
 /dist/
