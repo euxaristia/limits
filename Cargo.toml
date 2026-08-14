@@ -1,0 +1,50 @@
+[package]
+name = "limits"
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.97"
+description = "Every AI coding limit and quota, as a library, a CLI, and a live TUI"
+repository = "https://github.com/euxaristia/limits"
+readme = "README.md"
+license = "MIT"
+keywords = ["quota", "usage", "cli", "tui", "llm"]
+categories = ["command-line-utilities"]
+
+[lib]
+name = "limits"
+path = "src/lib.rs"
+
+[[bin]]
+name = "limits"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli", "tui"]
+# Terminal rendering and argument handling for the `limits` binary. The library
+# core never needs it, so an embedder takes `default-features = false`.
+cli = []
+# Full-screen live dashboard. Pulls in ratatui; `cli` drives it.
+tui = ["cli", "dep:ratatui"]
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.151"
+# Pinned to the same minor as cairn-code so a shared dependency tree resolves
+# to one copy of ratatui rather than two.
+ratatui = { version = "0.30.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Credentials",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
