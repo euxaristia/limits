@@ -13,10 +13,10 @@ use std::process::Command;
 
 const GO_KEYRING_BASE64: &str = "go-keyring-base64:";
 
-/// Fetch a secret, decoding go-keyring's base64 wrapper when present.
+/// Fetch a secret, decoding UTF-16LE and go-keyring's base64 wrapper when present.
 pub fn read(service: &str, account: &str) -> Option<Vec<u8>> {
     let raw = read_raw(service, account)?;
-    let text = String::from_utf8_lossy(&raw);
+    let text = decode_secret_bytes(&raw);
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
@@ -27,14 +27,44 @@ pub fn read(service: &str, account: &str) -> Option<Vec<u8>> {
     }
 }
 
+fn decode_secret_bytes(raw: &[u8]) -> String {
+    // Windows keyring crate (windows-native-keyring-store) stores password strings as UTF-16LE.
+    if raw.len() >= 2 && raw.len().is_multiple_of(2) && raw[1] == 0 && raw[0] != 0 {
+        let (chunks, _) = raw.as_chunks::<2>();
+        let units: Vec<u16> = chunks
+            .iter()
+            .map(|chunk| u16::from_le_bytes(*chunk))
+            .collect();
+        if let Ok(text) = String::from_utf16(&units) {
+            return text;
+        }
+    }
+    String::from_utf8_lossy(raw).to_string()
+}
+
 #[cfg(target_os = "windows")]
 fn read_raw(service: &str, account: &str) -> Option<Vec<u8>> {
+    for target_name in [
+        format!("{service}:{account}"),
+        format!("{account}.{service}"),
+        format!("{service}/{account}"),
+        format!("{service}.{account}"),
+    ] {
+        if let Some(secret) = read_target(&target_name) {
+            return Some(secret);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn read_target(target_name: &str) -> Option<Vec<u8>> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Security::Credentials::{
         CRED_TYPE_GENERIC, CREDENTIALW, CredFree, CredReadW,
     };
 
-    let target: Vec<u16> = std::ffi::OsStr::new(&format!("{service}:{account}"))
+    let target: Vec<u16> = std::ffi::OsStr::new(target_name)
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
