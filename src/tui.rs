@@ -17,7 +17,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Gauge, Paragraph};
+use ratatui::widgets::{Block, Clear, Gauge, Paragraph};
 use ratatui::{Frame, TerminalOptions, Viewport};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
@@ -257,6 +257,8 @@ fn dim() -> Style {
 }
 
 fn draw(frame: &mut Frame, app: &App) {
+    frame.render_widget(Clear, frame.area());
+
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
@@ -579,6 +581,7 @@ pub fn run(interval: Option<u64>, provider_filter: Option<String>) -> std::io::R
     let mut terminal = ratatui::try_init_with_options(TerminalOptions {
         viewport: Viewport::Fullscreen,
     })?;
+    terminal.clear()?;
     let result = event_loop(&mut terminal, interval, provider_filter);
     ratatui::restore();
     result
