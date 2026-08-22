@@ -265,24 +265,55 @@ pub fn load_gemini() -> Option<Token> {
     })
 }
 
-/// The Grok / xAI token from the OS keyring (cairn-code device OAuth / API key)
-/// or the Grok CLI's `~/.grok/auth.json`.
+/// The Grok / xAI token from the Grok CLI's `~/.grok/auth.json` or the OS
+/// keyring (cairn-code device OAuth / API key), whichever still holds a live
+/// session.
+///
+/// Order alone is not enough here. Only the Grok CLI refreshes its own file,
+/// and the refresh probe is what drives it; nothing rewrites the `cairn-code`
+/// keyring copy. A stale keyring entry that shadowed the file would therefore
+/// stay stale forever: every call would see an expired token, run the probe,
+/// refresh the file it then ignored, and hand back the same dead token.
 pub fn load_grok() -> Option<Token> {
+    pick_live(grok_candidates())
+}
+
+/// The first still-live credential, or the canonical one when none are.
+///
+/// Falling back to the head of the list rather than `None` keeps an expired
+/// token in play so the caller's refresh probe still has something to revive.
+fn pick_live(candidates: Vec<Token>) -> Option<Token> {
+    match candidates.iter().find(|token| token.is_fresh()) {
+        Some(fresh) => Some(fresh.clone()),
+        None => candidates.into_iter().next(),
+    }
+}
+
+/// Every Grok credential this machine holds, canonical store first.
+fn grok_candidates() -> Vec<Token> {
+    let mut found = Vec::new();
+
+    if let Some(root) = read_json(&home_dir().join(".grok").join("auth.json"))
+        && let Some(token) = parse_grok(&root)
+    {
+        found.push(token);
+    }
+
     for (service, account) in [
         ("cairn-code", "oauth:xai"),
         ("cairn-code", "xai"),
         ("grok", "auth"),
         ("grok", "oauth:grok"),
     ] {
-        if let Some(data) = keyring::read(service, account) {
-            if let Ok(value) = serde_json::from_slice::<Value>(&data) {
-                if let Some(token) = parse_grok(&value) {
-                    return Some(token);
-                }
-            } else {
+        let Some(data) = keyring::read(service, account) else {
+            continue;
+        };
+        match serde_json::from_slice::<Value>(&data) {
+            Ok(value) => found.extend(parse_grok(&value)),
+            Err(_) => {
                 let key = String::from_utf8_lossy(&data).trim().to_string();
                 if !key.is_empty() && !key.starts_with('{') {
-                    return Some(Token {
+                    found.push(Token {
                         access_token: key,
                         auth_method: "api_key".into(),
                         ..Default::default()
@@ -292,8 +323,7 @@ pub fn load_grok() -> Option<Token> {
         }
     }
 
-    let root = read_json(&home_dir().join(".grok").join("auth.json"))?;
-    parse_grok(&root)
+    found
 }
 
 pub(crate) fn parse_grok(root: &Value) -> Option<Token> {
@@ -684,6 +714,48 @@ mod tests {
         assert_eq!(token.access_token, "xai-api-key-test");
         assert_eq!(token.email, "grokuser@example.com");
         assert_eq!(token.auth_method, "oidc");
+    }
+
+    #[test]
+    fn a_stale_keyring_entry_never_shadows_a_live_credential() {
+        let live = now_unix() + 3_600;
+        let stale = Token {
+            access_token: "expired-keyring-copy".into(),
+            expires_at: Some(now_unix() - 3_600),
+            ..Default::default()
+        };
+        let fresh = Token {
+            access_token: "refreshed-cli-token".into(),
+            expires_at: Some(live),
+            ..Default::default()
+        };
+
+        // Canonical store first but expired, keyring second and live.
+        let picked = pick_live(vec![stale.clone(), fresh.clone()]).unwrap();
+        assert_eq!(picked.access_token, "refreshed-cli-token");
+
+        // Live canonical store wins over anything behind it.
+        let picked = pick_live(vec![fresh.clone(), stale.clone()]).unwrap();
+        assert_eq!(picked.access_token, "refreshed-cli-token");
+    }
+
+    #[test]
+    fn all_expired_falls_back_to_the_canonical_store_for_the_probe() {
+        let older = Token {
+            access_token: "canonical".into(),
+            expires_at: Some(now_unix() - 7_200),
+            ..Default::default()
+        };
+        let newer = Token {
+            access_token: "keyring".into(),
+            expires_at: Some(now_unix() - 60),
+            ..Default::default()
+        };
+        assert_eq!(
+            pick_live(vec![older, newer]).unwrap().access_token,
+            "canonical"
+        );
+        assert!(pick_live(Vec::new()).is_none());
     }
 
     #[test]
