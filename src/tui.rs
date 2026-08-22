@@ -612,12 +612,16 @@ fn event_loop(
         if !event::poll(FRAME)? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let key = match event::read()? {
+            // A resize leaves stale cells outside the new viewport, so wipe the
+            // buffer instead of painting the next frame over them.
+            Event::Resize(..) => {
+                terminal.clear()?;
+                continue;
+            }
+            Event::Key(key) if key.kind == KeyEventKind::Press => key,
+            _ => continue,
         };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
 
         app.message = None;
         match key.code {
