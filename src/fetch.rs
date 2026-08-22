@@ -587,8 +587,9 @@ impl<'a> Fetcher<'a> {
         };
 
         // Billing is where the percentage lives; the session expiry is only a
-        // stand-in until it answers.
-        let mut used_percent = 0.0;
+        // stand-in until it answers. `None` means it never answered, which is
+        // not the same as a window that has gone unspent.
+        let mut used_percent = None;
         let mut reset = match token.as_ref().and_then(|t| t.expires_at) {
             Some(expiry) => crate::time::countdown_between(expiry, now_unix()),
             None => "Active".to_string(),
@@ -598,9 +599,7 @@ impl<'a> Fetcher<'a> {
             "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
         )) && let Some(config) = billing.get("config")
         {
-            if let Some(percent) = config.get("creditUsagePercent").and_then(Value::as_f64) {
-                used_percent = percent;
-            }
+            used_percent = Some(grok_used_percent(config));
             if let Some(end) = config
                 .get("currentPeriod")
                 .and_then(|period| period.get("end"))
@@ -612,14 +611,15 @@ impl<'a> Fetcher<'a> {
         }
 
         let account = if email.is_empty() { "Active" } else { &email };
+        let window = match used_percent {
+            Some(percent) => {
+                UsageWindow::new("Weekly", percent).text(format!("{percent:.0}% used"))
+            }
+            None => UsageWindow::new("Weekly", 0.0).text("usage unavailable"),
+        };
         ProviderUsage::healthy(
             Provider::Grok,
-            vec![
-                UsageWindow::new("Weekly", used_percent)
-                    .reset(reset)
-                    .seconds(WEEK)
-                    .text(format!("{used_percent:.0}% used")),
-            ],
+            vec![window.reset(reset).seconds(WEEK)],
             format!("Grok CLI ({account})"),
         )
     }
@@ -792,6 +792,19 @@ pub fn fetch_all(http: &dyn HttpClient, configs: &[ProviderConfig]) -> Vec<Provi
     })
 }
 
+/// Share of the Grok credit window already spent, from a billing `config`.
+///
+/// The payload is protobuf JSON, which omits any field still holding its
+/// default. A billing period that has seen no spend therefore comes back with
+/// no `creditUsagePercent` at all, and that absence is a real zero rather than
+/// missing data: only a billing call that never landed leaves it unknown.
+fn grok_used_percent(config: &Value) -> f64 {
+    config
+        .get("creditUsagePercent")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -861,6 +874,51 @@ mod tests {
         "weekly":{"status":"rate-limited","percent":100,"resetsAt":"2099-08-17T00:00:00.112Z"},
         "monthly":{"status":"ok","percent":50,"resetsAt":"2099-09-12T22:42:28.112Z"}
     }}"#;
+
+    const GROK_USER: &str = r#"{"email":"grokuser@example.com"}"#;
+
+    #[test]
+    fn an_omitted_credit_percent_is_a_real_zero_not_missing_data() {
+        // Protobuf JSON drops a field sitting at its default, so a billing
+        // period with no spend answers without `creditUsagePercent` at all.
+        let unspent = serde_json::json!({
+            "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY"},
+            "onDemandUsed": {"val": 0}
+        });
+        assert_eq!(grok_used_percent(&unspent), 0.0);
+
+        let spent = serde_json::json!({"creditUsagePercent": 88.0});
+        assert_eq!(grok_used_percent(&spent), 88.0);
+    }
+
+    #[test]
+    fn grok_billing_that_never_answers_reports_unavailable_rather_than_zero() {
+        // Only the user call is routed; billing gets no route and so errors.
+        let http = FakeHttp::new(vec![("v1/user", 200, GROK_USER)]);
+        let usage = Fetcher::new(&http).fetch(&keyed("grok", "xai-test-key"));
+
+        assert_eq!(usage.status, crate::model::Status::Healthy);
+        let window = &usage.windows[0];
+        assert_eq!(window.label, "Weekly");
+        assert_eq!(
+            window.percent_text(),
+            "usage unavailable",
+            "a billing call that never landed must not read as 0% used"
+        );
+    }
+
+    #[test]
+    fn grok_reports_the_billing_percentage_when_it_answers() {
+        let billing = r#"{"config":{"creditUsagePercent":88.0}}"#;
+        let http = FakeHttp::new(vec![
+            ("v1/billing", 200, billing),
+            ("v1/user", 200, GROK_USER),
+        ]);
+        let usage = Fetcher::new(&http).fetch(&keyed("grok", "xai-test-key"));
+
+        assert_eq!(usage.windows[0].percent_text(), "88% used");
+        assert_eq!(usage.windows[0].used_percent, 88.0);
+    }
 
     #[test]
     fn opencode_reports_all_three_windows_and_names_the_spent_one() {
