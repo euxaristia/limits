@@ -96,7 +96,8 @@ impl Provider {
         match self {
             Provider::OpenAi => "API key required. Set with 'limits config set-key openai <key>'",
             Provider::Claude => {
-                "API key or Claude CLI login required (~/.claude/.credentials.json)"
+                "API key or Claude CLI login required (~/.claude/.credentials.json, \
+                 or the OS keyring on macOS)"
             }
             Provider::DeepSeek => {
                 "API key required. Set with 'limits config set-key deepseek <key>'"
