@@ -192,29 +192,42 @@ pub fn load_codex() -> Option<Token> {
     })
 }
 
-/// The OAuth session Claude Code keeps in `~/.claude/.credentials.json`,
-/// falling back to the OS keyring entry from cairn-code if absent.
+/// Every keyring entry that may hold a Claude Code session, canonical first.
+///
+/// `Claude Code-credentials` is where Claude Code puts the session on macOS,
+/// which writes no credentials file at all. That entry is keyed by the OS
+/// username rather than a fixed account name, so it is looked up by service
+/// alone instead of guessing whose login this is.
+const CLAUDE_KEYRING_ENTRIES: [(&str, Option<&str>); 4] = [
+    ("Claude Code-credentials", None),
+    ("cairn-code", Some("oauth:claude")),
+    ("cairn-code", Some("claude")),
+    ("claude", Some("credentials")),
+];
+
+/// The OAuth session Claude Code keeps in `~/.claude/.credentials.json` on
+/// Linux and Windows, or in the OS keyring on macOS.
+///
+/// Both stores are read and the live one wins, for the reason spelled out on
+/// [`load_grok`]: only Claude Code itself rewrites either copy, so whichever
+/// one it has stopped touching would otherwise shadow the one it still
+/// refreshes, and every call would hand back a permanently expired token.
 pub fn load_claude() -> Option<Token> {
-    if let Some(root) = read_json(&home_dir().join(".claude").join(".credentials.json"))
-        && let Some(token) = parse_claude(&root)
-    {
-        return Some(token);
-    }
+    pick_live(claude_candidates(keyring::read))
+}
 
-    for (service, account) in [
-        ("cairn-code", "oauth:claude"),
-        ("cairn-code", "claude"),
-        ("claude", "credentials"),
-    ] {
-        if let Some(data) = keyring::read(service, account)
-            && let Ok(value) = serde_json::from_slice::<Value>(&data)
-            && let Some(token) = parse_claude(&value)
-        {
-            return Some(token);
-        }
-    }
+fn claude_candidates(read: impl Fn(&str, Option<&str>) -> Option<Vec<u8>>) -> Vec<Token> {
+    let file = read_json(&home_dir().join(".claude").join(".credentials.json"));
+    let stored = CLAUDE_KEYRING_ENTRIES
+        .iter()
+        .filter_map(|(service, account)| {
+            serde_json::from_slice::<Value>(&read(service, *account)?).ok()
+        });
 
-    None
+    file.into_iter()
+        .chain(stored)
+        .filter_map(|value| parse_claude(&value))
+        .collect()
 }
 
 pub(crate) fn parse_claude(root: &Value) -> Option<Token> {
@@ -305,7 +318,7 @@ fn grok_candidates() -> Vec<Token> {
         ("grok", "auth"),
         ("grok", "oauth:grok"),
     ] {
-        let Some(data) = keyring::read(service, account) else {
+        let Some(data) = keyring::read(service, Some(account)) else {
             continue;
         };
         match serde_json::from_slice::<Value>(&data) {
@@ -383,7 +396,7 @@ fn parse_grok_entry(entry: &Value) -> Option<Token> {
 /// after. Recent versions keep the live token in the keyring and leave the file
 /// behind stale, so file-first would report a permanently expired session.
 pub fn load_antigravity() -> Option<Token> {
-    if let Some(data) = keyring::read("gemini", "antigravity")
+    if let Some(data) = keyring::read("gemini", Some("antigravity"))
         && let Ok(value) = serde_json::from_slice::<Value>(&data)
         && let Some(token) = parse_antigravity(&value)
     {
@@ -683,6 +696,33 @@ mod tests {
         for bad in ["", "single", "a.!!!.c", "a.YWJj.c"] {
             assert_eq!(email_from_jwt(bad), "");
         }
+    }
+
+    #[test]
+    fn reads_the_claude_code_keyring_entry_keyed_by_os_username() {
+        // macOS Claude Code writes no credentials file: the session lives in
+        // the login keychain under a service whose account is the OS username,
+        // so the lookup must match on the service alone.
+        let stored = json!({
+            "claudeAiOauth": {
+                "accessToken": "sk-ant-oat01-access",
+                "refreshToken": "sk-ant-ort01-refresh",
+                "expiresAt": 4102444800000i64,
+                "subscriptionType": "pro"
+            }
+        })
+        .to_string();
+
+        let tokens = claude_candidates(|service, account| {
+            (service == "Claude Code-credentials" && account.is_none())
+                .then(|| stored.clone().into_bytes())
+        });
+
+        let token = tokens.first().expect("keychain entry should be read");
+        assert_eq!(token.access_token, "sk-ant-oat01-access");
+        assert_eq!(token.refresh_token, "sk-ant-ort01-refresh");
+        assert_eq!(token.plan_type, "pro");
+        assert!(token.is_fresh());
     }
 
     #[test]

@@ -7,14 +7,19 @@
 //! The value is written by go-keyring, which base64-encodes payloads behind a
 //! `go-keyring-base64:` marker and, on Windows, stores the entry as a generic
 //! credential named `service:account`.
+//!
+//! An account of `None` matches on the service alone. Claude Code's macOS
+//! entry needs that: it is keyed by the OS username, which this crate has no
+//! business guessing.
 
 use crate::credentials::headless;
 use std::process::Command;
 
 const GO_KEYRING_BASE64: &str = "go-keyring-base64:";
 
-/// Fetch a secret, decoding UTF-16LE and go-keyring's base64 wrapper when present.
-pub fn read(service: &str, account: &str) -> Option<Vec<u8>> {
+/// Fetch a secret, decoding UTF-16LE and go-keyring's base64 wrapper when
+/// present. `account` of `None` matches any account under the service.
+pub fn read(service: &str, account: Option<&str>) -> Option<Vec<u8>> {
     let raw = read_raw(service, account)?;
     let text = decode_secret_bytes(&raw);
     let trimmed = text.trim();
@@ -43,7 +48,12 @@ fn decode_secret_bytes(raw: &[u8]) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn read_raw(service: &str, account: &str) -> Option<Vec<u8>> {
+fn read_raw(service: &str, account: Option<&str>) -> Option<Vec<u8>> {
+    let Some(account) = account else {
+        // Nothing on Windows can enumerate a target by service alone, so the
+        // service name is the only candidate.
+        return read_target(service);
+    };
     for target_name in [
         format!("{service}:{account}"),
         format!("{account}.{service}"),
@@ -89,24 +99,27 @@ fn read_target(target_name: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(target_os = "macos")]
-fn read_raw(service: &str, account: &str) -> Option<Vec<u8>> {
-    run(Command::new("security").args([
-        "find-generic-password",
-        "-s",
-        service,
-        "-a",
-        account,
-        "-w",
-    ]))
+fn read_raw(service: &str, account: Option<&str>) -> Option<Vec<u8>> {
+    let mut command = Command::new("security");
+    command.args(["find-generic-password", "-s", service]);
+    if let Some(account) = account {
+        command.args(["-a", account]);
+    }
+    run(command.arg("-w"))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn read_raw(service: &str, account: &str) -> Option<Vec<u8>> {
-    run(Command::new("secret-tool").args(["lookup", "service", service, "username", account]))
+fn read_raw(service: &str, account: Option<&str>) -> Option<Vec<u8>> {
+    let mut command = Command::new("secret-tool");
+    command.args(["lookup", "service", service]);
+    if let Some(account) = account {
+        command.args(["username", account]);
+    }
+    run(&mut command)
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
-fn read_raw(_service: &str, _account: &str) -> Option<Vec<u8>> {
+fn read_raw(_service: &str, _account: Option<&str>) -> Option<Vec<u8>> {
     None
 }
 
