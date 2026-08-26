@@ -411,6 +411,8 @@ pub fn load_opencode_key() -> Option<String> {
     opencode_key_candidates(keyring::read).into_iter().next()
 }
 
+/// Every OpenCode Go key this machine holds, canonical store first. The
+/// keyring reader is injected so the ordering can be tested without one.
 fn opencode_key_candidates(read: impl Fn(&str, Option<&str>) -> Option<Vec<u8>>) -> Vec<String> {
     OPENCODE_KEYRING_ENTRIES
         .iter()
@@ -421,12 +423,17 @@ fn opencode_key_candidates(read: impl Fn(&str, Option<&str>) -> Option<Vec<u8>>)
 
 /// A keyring payload, which is either the bare key or the JSON blob a store
 /// that keeps more than the key writes.
+///
+/// A payload that opens like JSON but does not parse is a truncated or corrupt
+/// blob, and so is one that is not valid UTF-8. Neither is returned as a bare
+/// key: a value that can only be rejected with a 401 would otherwise take the
+/// place of the stores checked after it.
 fn key_from_secret(data: &[u8]) -> Option<String> {
-    if let Ok(value) = serde_json::from_slice::<Value>(data) {
-        return opencode_key_from_json(&value);
+    let text = std::str::from_utf8(data).ok()?.trim();
+    if text.starts_with('{') || text.starts_with('[') {
+        return opencode_key_from_json(&serde_json::from_str(text).ok()?);
     }
-    let key = String::from_utf8_lossy(data).trim().to_string();
-    (!key.is_empty()).then_some(key)
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// `auth.json` in the `opencode` CLI's own data directory, which keys each
@@ -443,6 +450,8 @@ fn opencode_auth_file_key() -> Option<String> {
         .find_map(opencode_key_from_json)
 }
 
+/// The key out of a stored credential object, whichever of the field names
+/// the writing CLI used.
 fn opencode_key_from_json(value: &Value) -> Option<String> {
     string_at(value, "key")
         .or_else(|| string_at(value, "api_key"))
@@ -1009,6 +1018,19 @@ mod tests {
     }
 
     #[test]
+    fn a_corrupt_keyring_entry_does_not_shadow_a_later_valid_one() {
+        let candidates = opencode_key_candidates(|service, account| match (service, account) {
+            // A truncated blob and a non-UTF-8 one: both would 401 if returned.
+            ("cairn-code", Some("opencode-go")) => Some(br#"{"key":"sk-trunc"#.to_vec()),
+            ("cairn-code", Some("opencode")) => Some(vec![0xff, 0xfe, 0x00]),
+            ("opencode", Some("opencode-go")) => Some(b"sk-valid".to_vec()),
+            _ => None,
+        });
+
+        assert_eq!(candidates.first().map(String::as_str), Some("sk-valid"));
+    }
+
+    #[test]
     fn a_json_keyring_payload_yields_the_key_rather_than_the_blob() {
         assert_eq!(
             key_from_secret(br#"{"type":"api","key":"sk-json"}"#),
@@ -1020,6 +1042,8 @@ mod tests {
         );
         assert_eq!(key_from_secret(b"   "), None);
         assert_eq!(key_from_secret(br#"{"type":"oauth"}"#), None);
+        assert_eq!(key_from_secret(br#"{"key":"sk-trunc"#), None);
+        assert_eq!(key_from_secret(&[0xff, 0xfe, 0x00]), None);
     }
 
     #[test]
