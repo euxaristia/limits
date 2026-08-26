@@ -250,7 +250,7 @@ impl<'a> Fetcher<'a> {
         if response.is_auth_failure() {
             return ProviderUsage::degraded(
                 Provider::OpenCode,
-                "OpenCode Go rejected the key; check OPENCODE_GO_API_KEY",
+                "OpenCode Go rejected the key; re-authenticate the CLI or set OPENCODE_GO_API_KEY",
             );
         }
         if !response.is_success() {
@@ -699,7 +699,8 @@ fn copilot_unavailable(reason: &str) -> ProviderUsage {
 
 /// The OpenCode Go key: explicit config first, then the two environment
 /// variables in use (`OPENCODE_GO_API_KEY` is the documented one;
-/// `OPENCODE_API_KEY` is what the upstream CLI sets).
+/// `OPENCODE_API_KEY` is what the upstream CLI sets), then the stores the
+/// local CLIs already keep it in.
 fn opencode_key(config: &ProviderConfig) -> Option<String> {
     if config.has_api_key() {
         return Some(config.api_key.trim().to_string());
@@ -712,6 +713,7 @@ fn opencode_key(config: &ProviderConfig) -> Option<String> {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
         })
+        .or_else(credentials::load_opencode_key)
 }
 
 /// Pull the session key out of either a bare key or a full Cookie header.

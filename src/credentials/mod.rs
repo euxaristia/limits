@@ -2,8 +2,8 @@
 //! them refreshed when they have gone stale.
 //!
 //! `limits` never asks the user to paste a token that a CLI on the same machine
-//! already holds. It reads `codex login`, `claude`, `gemini`, `grok`, and
-//! Antigravity's own stores directly. Nothing here writes a credential; the
+//! already holds. It reads `codex login`, `claude`, `gemini`, `grok`,
+//! `opencode`, and Antigravity's own stores directly. Nothing here writes a credential; the
 //! only mutation is asking a provider's own CLI to refresh its own token.
 
 pub mod headless;
@@ -390,6 +390,63 @@ fn parse_grok_entry(entry: &Value) -> Option<Token> {
     }
 
     None
+}
+
+/// Every keyring entry that may hold an OpenCode Go API key, canonical first.
+///
+/// cairn-code writes the key under the provider id it uses internally
+/// (`opencode-go`); the upstream `opencode` CLI keeps its own copy in
+/// `auth.json`, which [`opencode_auth_file_key`] reads.
+const OPENCODE_KEYRING_ENTRIES: [(&str, &str); 3] = [
+    ("cairn-code", "opencode-go"),
+    ("cairn-code", "opencode"),
+    ("opencode", "opencode-go"),
+];
+
+/// The OpenCode Go API key a CLI on this machine already holds.
+///
+/// Unlike the OAuth providers there is nothing to refresh here: the key is a
+/// long-lived secret, so the first store that has one wins.
+pub fn load_opencode_key() -> Option<String> {
+    opencode_key_candidates(keyring::read).into_iter().next()
+}
+
+fn opencode_key_candidates(read: impl Fn(&str, Option<&str>) -> Option<Vec<u8>>) -> Vec<String> {
+    OPENCODE_KEYRING_ENTRIES
+        .iter()
+        .filter_map(|(service, account)| key_from_secret(&read(service, Some(account))?))
+        .chain(opencode_auth_file_key())
+        .collect()
+}
+
+/// A keyring payload, which is either the bare key or the JSON blob a store
+/// that keeps more than the key writes.
+fn key_from_secret(data: &[u8]) -> Option<String> {
+    if let Ok(value) = serde_json::from_slice::<Value>(data) {
+        return opencode_key_from_json(&value);
+    }
+    let key = String::from_utf8_lossy(data).trim().to_string();
+    (!key.is_empty()).then_some(key)
+}
+
+/// `auth.json` in the `opencode` CLI's own data directory, which keys each
+/// provider's credential by provider id.
+fn opencode_auth_file_key() -> Option<String> {
+    let base = match std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
+        Some(value) => PathBuf::from(value),
+        None => home_dir().join(".local").join("share"),
+    };
+    let root = read_json(&base.join("opencode").join("auth.json"))?;
+    ["opencode", "opencode-go"]
+        .iter()
+        .filter_map(|id| root.get(*id))
+        .find_map(opencode_key_from_json)
+}
+
+fn opencode_key_from_json(value: &Value) -> Option<String> {
+    string_at(value, "key")
+        .or_else(|| string_at(value, "api_key"))
+        .or_else(|| string_at(value, "access"))
 }
 
 /// Antigravity's OAuth token, from the keyring first and the on-disk stores
@@ -927,6 +984,42 @@ mod tests {
                 args: &["models"]
             }]
         );
+    }
+
+    #[test]
+    fn opencode_key_comes_from_the_cairn_code_keyring_entry() {
+        let candidates = opencode_key_candidates(|service, account| {
+            (service == "cairn-code" && account == Some("opencode-go"))
+                .then(|| b"  sk-live  ".to_vec())
+        });
+
+        assert_eq!(candidates.first().map(String::as_str), Some("sk-live"));
+    }
+
+    #[test]
+    fn opencode_keyring_entries_are_read_in_order() {
+        let candidates = opencode_key_candidates(|service, account| match (service, account) {
+            ("cairn-code", Some("opencode-go")) => Some(b"sk-first".to_vec()),
+            ("cairn-code", Some("opencode")) => Some(b"sk-second".to_vec()),
+            _ => None,
+        });
+
+        assert_eq!(candidates[0], "sk-first");
+        assert_eq!(candidates[1], "sk-second");
+    }
+
+    #[test]
+    fn a_json_keyring_payload_yields_the_key_rather_than_the_blob() {
+        assert_eq!(
+            key_from_secret(br#"{"type":"api","key":"sk-json"}"#),
+            Some("sk-json".to_string())
+        );
+        assert_eq!(
+            key_from_secret(br#"{"type":"oauth","access":"sk-access"}"#),
+            Some("sk-access".to_string())
+        );
+        assert_eq!(key_from_secret(b"   "), None);
+        assert_eq!(key_from_secret(br#"{"type":"oauth"}"#), None);
     }
 
     #[test]

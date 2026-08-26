@@ -162,7 +162,7 @@ limits/
 | Grok | `~/.grok/auth.json` |
 | Gemini | `~/.gemini/oauth_creds.json` |
 | GitHub Copilot | `gh auth token`, or an API key |
-| OpenCode Go | `OPENCODE_GO_API_KEY` / `OPENCODE_API_KEY`, or an API key in config |
+| OpenCode Go | `OPENCODE_GO_API_KEY` / `OPENCODE_API_KEY`, the OS keyring entry cairn-code writes, `~/.local/share/opencode/auth.json`, or an API key in config |
 | OpenAI, DeepSeek, OpenRouter | API key in config |
 
 For OAuth-backed providers (Claude, Antigravity, Grok, Gemini, Copilot), `limits` will run the provider's own CLI headlessly to force a token refresh if the stored one has expired, before giving up.
