@@ -183,9 +183,17 @@ impl App {
         for usage in &results {
             // A provider that reported nothing contributes no point, so a
             // transient failure does not draw a cliff into the trend.
-            if usage.status == Status::Healthy && !usage.windows.is_empty() {
+            if usage.status == Status::Healthy
+                && !usage.has_error
+                && let Some(used) = usage
+                    .windows
+                    .iter()
+                    .filter(|window| window.remaining_percent().is_some())
+                    .map(|window| window.used_percent)
+                    .reduce(f64::max)
+            {
                 let points = self.history.entry(usage.id.clone()).or_default();
-                points.push(usage.peak_percent());
+                points.push(used);
                 if points.len() > HISTORY {
                     points.remove(0);
                 }
@@ -279,8 +287,8 @@ fn draw(frame: &mut Frame, app: &App) {
             .map(|p| p.usage.display_name.chars().count())
             .max()
             .unwrap_or(12)
-            .clamp(12, 28) as u16
-            + 12;
+            .clamp(16, 28) as u16
+            + 16;
         let [list, detail] =
             Layout::horizontal([Constraint::Length(list_width), Constraint::Fill(1)]).areas(body);
         draw_list(frame, list, app, &visible);
@@ -346,14 +354,20 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App, visible: &[&LiveProvider]
         .enumerate()
         .map(|(index, provider)| {
             let selected = index == app.selected;
-            let percent = provider.usage.peak_percent();
             let marker = if selected { "\u{25b8} " } else { "  " };
 
             let (label, colour) = match provider.usage.status {
-                Status::Healthy if provider.usage.windows.is_empty() => {
-                    ("  --".to_string(), Color::DarkGray)
-                }
-                Status::Healthy => (format!("{percent:>4.0}%"), severity(percent)),
+                Status::Healthy => match provider.usage.remaining_percent() {
+                    Some(left) => (format!("{left:>5.1}% left"), severity(100.0 - left)),
+                    None if !provider.usage.windows.is_empty()
+                        && provider.usage.windows.iter().all(|window| {
+                            window.percent_text_override.as_deref() == Some("Unlimited")
+                        }) =>
+                    {
+                        ("Unlimited".to_string(), Color::DarkGray)
+                    }
+                    None => ("  --".to_string(), Color::DarkGray),
+                },
                 Status::Degraded => ("  err".to_string(), Color::Yellow),
                 Status::Unconfigured => ("   --".to_string(), Color::DarkGray),
             };
@@ -368,7 +382,10 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App, visible: &[&LiveProvider]
 
             Line::from(vec![
                 Span::styled(marker, Style::new().fg(Color::Cyan)),
-                Span::styled(format!("{:<w$}", provider.usage.display_name, w = 16), name),
+                Span::styled(
+                    format!("{:<w$} ", provider.usage.display_name, w = 16),
+                    name,
+                ),
                 Span::styled(label, Style::new().fg(colour)),
             ])
         })
@@ -456,6 +473,7 @@ fn draw_windows(frame: &mut Frame, area: Rect, provider: &LiveProvider) {
         } else {
             format!("resets {countdown}")
         };
+        let remaining = window.window.remaining_percent();
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
@@ -464,8 +482,10 @@ fn draw_windows(frame: &mut Frame, area: Rect, provider: &LiveProvider) {
                 ),
                 Span::raw("  "),
                 Span::styled(
-                    window.window.percent_text(),
-                    Style::new().fg(severity(window.window.used_percent)),
+                    window.window.remaining_text(),
+                    Style::new().fg(remaining
+                        .map(|_| severity(window.window.used_percent))
+                        .unwrap_or(Color::DarkGray)),
                 ),
                 Span::styled(format!("   {reset}"), dim()),
             ])),
@@ -474,30 +494,38 @@ fn draw_windows(frame: &mut Frame, area: Rect, provider: &LiveProvider) {
 
         // `ratio` rather than `percent` so a bar does not snap to whole
         // percentage points as the number creeps.
-        frame.render_widget(
-            Gauge::default()
-                .ratio((window.window.used_percent / 100.0).clamp(0.0, 1.0))
-                .label("")
-                .gauge_style(Style::new().fg(severity(window.window.used_percent)))
-                .style(dim()),
-            rows[bar_row],
-        );
+        if let Some(remaining) = remaining {
+            frame.render_widget(
+                Gauge::default()
+                    .ratio(remaining / 100.0)
+                    .label("")
+                    .gauge_style(Style::new().fg(severity(window.window.used_percent)))
+                    .style(dim()),
+                rows[bar_row],
+            );
+        }
     }
 }
 
 /// A trend line of the readings taken so far this session.
 fn draw_trend(frame: &mut Frame, area: Rect, app: &App, id: &str) {
-    if area.height == 0 {
+    if area.height == 0
+        || !app
+            .providers
+            .iter()
+            .any(|provider| provider.usage.id == id && provider.usage.remaining_percent().is_some())
+    {
         return;
     }
     let points = app.history.get(id).map(Vec::as_slice).unwrap_or(&[]);
     let line = if points.len() < 2 {
-        Line::styled("trend  (collecting…)", dim())
+        Line::styled("trend (% left)  (collecting…)", dim())
     } else {
+        let remaining: Vec<f64> = points.iter().map(|used| 100.0 - used).collect();
         Line::from(vec![
-            Span::styled("trend  ", dim()),
+            Span::styled("trend (% left)  ", dim()),
             Span::styled(
-                sparkline(points, area.width.saturating_sub(8) as usize),
+                sparkline(&remaining, area.width.saturating_sub(16) as usize),
                 Style::new().fg(severity(*points.last().unwrap_or(&0.0))),
             ),
         ])
@@ -834,16 +862,22 @@ mod tests {
     /// Render one frame and read the cells back as text, so the layout is
     /// exercised for real rather than only its inputs.
     fn render(app: &App, width: u16, height: u16) -> String {
+        buffer_text(&render_with(width, height, |frame| draw(frame, app)))
+    }
+
+    fn render_with(
+        width: u16,
+        height: u16,
+        draw: impl FnMut(&mut Frame),
+    ) -> ratatui::buffer::Buffer {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| draw(frame, app)).unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect()
+        terminal.draw(draw).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        buffer.content().iter().map(|cell| cell.symbol()).collect()
     }
 
     #[test]
@@ -909,6 +943,239 @@ mod tests {
         // A pane too short for its content must clip, not panic.
         for (width, height) in [(20, 3), (40, 5), (200, 60), (12, 2)] {
             let _ = render(&app, width, height);
+        }
+    }
+
+    #[test]
+    fn details_and_long_sidebar_names_show_percent_left_at_ordinary_and_narrow_sizes() {
+        let mut app = App::new(60);
+        let mut usage = healthy("quota", 30.0, "");
+        usage.display_name = "Provider with a long name".into();
+        app.apply(vec![usage]);
+
+        for width in [100, 64] {
+            let screen = render(&app, width, 12);
+            assert!(screen.contains("Provider with a long name"), "{screen}");
+            assert_eq!(screen.matches("70.0% left").count(), 2, "{screen}");
+            assert!(!screen.contains("30.0%"), "{screen}");
+        }
+    }
+
+    #[test]
+    fn thirty_percent_used_fills_seventy_percent_of_the_remaining_gauge() {
+        let provider = LiveProvider::new(healthy("quota", 30.0, ""), now_unix());
+        for width in [10, 20, 70] {
+            let buffer = render_with(width, 2, |frame| {
+                draw_windows(frame, frame.area(), &provider);
+            });
+            let filled = width * 7 / 10;
+            for x in 0..width {
+                let cell = &buffer[(x, 1)];
+                if x < filled {
+                    assert!(
+                        (cell.symbol() == "█" && cell.fg == Color::Green)
+                            || (cell.symbol() == " " && cell.bg == Color::Green),
+                        "width {width}, x {x}: {cell:?}"
+                    );
+                } else {
+                    assert_eq!(cell.symbol(), " ", "width {width}, x {x}");
+                    assert_eq!(cell.bg, Color::Reset, "width {width}, x {x}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn remaining_labels_keep_fractional_detail_near_exhaustion() {
+        let mut app = App::new(60);
+        app.apply(vec![healthy("quota", 99.5, "")]);
+        let screen = render(&app, 100, 12);
+        assert_eq!(screen.matches("0.5% left").count(), 2, "{screen}");
+        assert!(!screen.contains("99.5%"), "{screen}");
+    }
+
+    #[test]
+    fn copilot_details_preserve_consumed_counts_with_remaining_percentage() {
+        let provider = LiveProvider::new(
+            ProviderUsage::healthy(
+                Provider::Copilot,
+                vec![UsageWindow::new("Premium", 2.0).text("4 / 200 (2.0% used)")],
+                "",
+            ),
+            now_unix(),
+        );
+        let buffer = render_with(60, 2, |frame| {
+            draw_windows(frame, frame.area(), &provider);
+        });
+        let screen = buffer_text(&buffer);
+        assert!(screen.contains("4 / 200 used (98.0% left)"), "{screen}");
+        assert!(!screen.contains("2.0% used"), "{screen}");
+    }
+
+    #[test]
+    fn nonnumeric_windows_show_their_text_without_a_gauge_or_history() {
+        for text in ["Unlimited", "Unavailable"] {
+            let usage = ProviderUsage::healthy(
+                Provider::Unknown,
+                vec![UsageWindow::new("Quota", 100.0).text(text)],
+                "",
+            );
+            let provider = LiveProvider::new(usage.clone(), now_unix());
+            let buffer = render_with(40, 2, |frame| {
+                draw_windows(frame, frame.area(), &provider);
+            });
+            assert!(buffer_text(&buffer).contains(text));
+            for x in 0..40 {
+                let cell = &buffer[(x, 1)];
+                assert_eq!(cell.symbol(), " ", "{text}, x {x}");
+                assert_eq!(cell.fg, Color::Reset, "{text}, x {x}");
+                assert_eq!(cell.bg, Color::Reset, "{text}, x {x}");
+            }
+            let mut app = App::new(60);
+            app.apply(vec![usage]);
+            assert!(app.history.is_empty(), "{text}: {:?}", app.history);
+        }
+    }
+
+    #[test]
+    fn sidebar_distinguishes_all_unlimited_from_other_unmeasurable_readings() {
+        for (windows, expected) in [
+            (
+                vec![
+                    UsageWindow::new("Session", 0.0).text("Unlimited"),
+                    UsageWindow::new("Weekly", 0.0).text("Unlimited"),
+                ],
+                "Unlimited",
+            ),
+            (
+                vec![
+                    UsageWindow::new("Session", 0.0).text("Unlimited"),
+                    UsageWindow::new("Weekly", 0.0).text("Unavailable"),
+                ],
+                "--",
+            ),
+            (vec![], "--"),
+        ] {
+            let mut app = App::new(60);
+            app.apply(vec![ProviderUsage::healthy(Provider::Unknown, windows, "")]);
+            let buffer = render_with(40, 5, |frame| {
+                draw_list(frame, frame.area(), &app, &app.visible());
+            });
+            let screen = buffer_text(&buffer);
+            assert!(screen.contains(expected), "{screen}");
+            assert!(!screen.contains('%'), "{screen}");
+        }
+    }
+
+    #[test]
+    fn history_and_sidebar_ignore_unmeasurable_windows_when_selecting_the_peak() {
+        let mut app = App::new(60);
+        app.apply(vec![ProviderUsage::healthy(
+            Provider::Unknown,
+            vec![
+                UsageWindow::new("Session", 20.0),
+                UsageWindow::new("Weekly", 30.0),
+                UsageWindow::new("Other", 100.0).text("Unavailable"),
+            ],
+            "",
+        )]);
+        assert_eq!(app.history["unknown"], vec![30.0]);
+        let buffer = render_with(40, 5, |frame| {
+            draw_list(frame, frame.area(), &app, &app.visible());
+        });
+        assert!(buffer_text(&buffer).contains("70.0% left"));
+    }
+
+    #[test]
+    fn healthy_readings_with_errors_do_not_append_history() {
+        let mut app = App::new(60);
+        app.apply(vec![healthy("quota", 30.0, "")]);
+        let mut failed = healthy("quota", 100.0, "");
+        failed.has_error = true;
+        failed.error_message = "partial reading failed".into();
+        app.apply(vec![failed]);
+        assert_eq!(app.history["quota"], vec![30.0]);
+    }
+
+    #[test]
+    fn fractional_consumption_is_recorded_without_round_trip_loss() {
+        let mut app = App::new(60);
+        for used in [0.1, 0.2, 99.5] {
+            app.apply(vec![healthy("quota", used, "")]);
+        }
+        assert_eq!(app.history["quota"], vec![0.1, 0.2, 99.5]);
+    }
+
+    #[test]
+    fn remaining_trends_fall_as_consumption_rises_without_changing_raw_history() {
+        let mut app = App::new(60);
+        for used in [0.0, 50.0, 100.0] {
+            app.apply(vec![healthy("quota", used, "")]);
+        }
+        assert_eq!(app.history["quota"], vec![0.0, 50.0, 100.0]);
+        for (width, expected) in [(40, "█▅▁"), (17, "▁")] {
+            let buffer = render_with(width, 1, |frame| {
+                draw_trend(frame, frame.area(), &app, "quota");
+            });
+            let screen = buffer_text(&buffer);
+            assert!(screen.contains("trend (% left)"), "{screen}");
+            assert!(screen.trim_end().ends_with(expected), "{screen}");
+            assert_eq!(buffer[(16, 0)].fg, Color::Red);
+        }
+    }
+
+    #[test]
+    fn stale_trends_are_suppressed_when_current_windows_are_unmeasurable() {
+        for windows in [
+            vec![],
+            vec![UsageWindow::new("Quota", 0.0).text("Unlimited")],
+            vec![UsageWindow::new("Quota", 0.0).text("Unavailable")],
+        ] {
+            let mut app = App::new(60);
+            app.apply(vec![healthy("quota", 20.0, "")]);
+            app.apply(vec![healthy("quota", 30.0, "")]);
+            let mut current = ProviderUsage::healthy(Provider::Unknown, windows, "");
+            current.id = "quota".into();
+            app.apply(vec![current]);
+            let buffer = render_with(40, 1, |frame| {
+                draw_trend(frame, frame.area(), &app, "quota");
+            });
+            assert!(buffer_text(&buffer).trim().is_empty());
+            assert_eq!(app.history["quota"], vec![20.0, 30.0]);
+        }
+    }
+
+    #[test]
+    fn remaining_gauges_and_sidebar_keep_used_percent_severity_boundaries() {
+        for (used, left, colour) in [
+            (74.9, "25.1% left", Color::Green),
+            (75.0, "25.0% left", Color::Yellow),
+            (89.9, "10.1% left", Color::Yellow),
+            (90.0, "10.0% left", Color::Red),
+        ] {
+            let mut app = App::new(60);
+            app.apply(vec![healthy("quota", used, "")]);
+            let provider = app.selected_provider().unwrap();
+            let buffer = render_with(100, 2, |frame| {
+                draw_windows(frame, frame.area(), provider);
+            });
+            assert!(buffer_text(&buffer).contains(left));
+            let cell = &buffer[(0, 1)];
+            assert_eq!(cell.symbol(), "█");
+            assert_eq!(cell.fg, colour);
+            let filled = (100.0 - used).round() as u16;
+            assert_eq!(buffer[(filled - 1, 1)].symbol(), "█");
+            assert_eq!(buffer[(filled, 1)].symbol(), " ");
+            let buffer = render_with(40, 5, |frame| {
+                draw_list(frame, frame.area(), &app, &app.visible());
+            });
+            assert!(buffer_text(&buffer).contains(left));
+            assert!(
+                buffer
+                    .content()
+                    .iter()
+                    .any(|cell| cell.symbol() == "%" && cell.fg == colour)
+            );
         }
     }
 

@@ -10,7 +10,9 @@
 //! ```no_run
 //! let limits = limits::Limits::new();
 //! for usage in limits.snapshot() {
-//!     println!("{}: {:.0}% used", usage.display_name, usage.peak_percent());
+//!     if let Some(left) = usage.remaining_percent() {
+//!         println!("{}: {:.1}% left", usage.display_name, left);
+//!     }
 //! }
 //! ```
 //!

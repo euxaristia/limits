@@ -348,11 +348,13 @@ impl<'a> Fetcher<'a> {
 
         // A prepaid balance has no denominator, so there is no percentage to
         // show; the footer carries the number that matters.
-        ProviderUsage::from_balance(
+        ProviderUsage::healthy(
             Provider::DeepSeek,
-            0.0,
-            balance,
-            "Never Resets",
+            vec![
+                UsageWindow::new("Quota", 0.0)
+                    .reset("Never Resets")
+                    .text("Balance only"),
+            ],
             format!("Available: ${balance:.2}"),
         )
     }
@@ -413,25 +415,9 @@ impl<'a> Fetcher<'a> {
             return ProviderUsage::degraded(Provider::Gemini, "unexpected Gemini response shape");
         };
 
-        // The account is as limited as its most depleted bucket.
-        let mut lowest = 1.0_f64;
-        let mut reset = "Daily Quota".to_string();
-        if let Some(buckets) = body.get("buckets").and_then(Value::as_array) {
-            for bucket in buckets {
-                if let Some(fraction) = bucket.get("remainingFraction").and_then(Value::as_f64) {
-                    lowest = lowest.min(fraction);
-                }
-                if let Some(at) = bucket.get("resetTime").and_then(Value::as_str)
-                    && !at.is_empty()
-                {
-                    reset = format_countdown(at);
-                }
-            }
-        }
-
         ProviderUsage::healthy(
             Provider::Gemini,
-            vec![UsageWindow::new("Quota", (1.0 - lowest) * 100.0).reset(reset)],
+            vec![gemini_window(&body)],
             "Google Code Assist Quota",
         )
     }
@@ -491,7 +477,11 @@ impl<'a> Fetcher<'a> {
         if buckets.is_empty() {
             return ProviderUsage::healthy(
                 Provider::Antigravity,
-                vec![UsageWindow::new("Quota", 0.0).reset("N/A")],
+                vec![
+                    UsageWindow::new("Quota", 0.0)
+                        .reset("N/A")
+                        .text("quota unavailable"),
+                ],
                 format!("Antigravity ({account}) - no quota data"),
             );
         }
@@ -721,6 +711,31 @@ fn session_key_from(source: &str) -> String {
     match source.split_once("sessionKey=") {
         Some((_, rest)) => rest.split(';').next().unwrap_or(rest).trim().to_string(),
         None => source.trim().to_string(),
+    }
+}
+
+fn gemini_window(body: &Value) -> UsageWindow {
+    let mut lowest = 1.0_f64;
+    let mut has_quota = false;
+    let mut reset = "Daily Quota".to_string();
+    if let Some(buckets) = body.get("buckets").and_then(Value::as_array) {
+        for bucket in buckets {
+            if let Some(fraction) = bucket.get("remainingFraction").and_then(Value::as_f64) {
+                lowest = lowest.min(fraction);
+                has_quota = true;
+            }
+            if let Some(at) = bucket.get("resetTime").and_then(Value::as_str)
+                && !at.is_empty()
+            {
+                reset = format_countdown(at);
+            }
+        }
+    }
+    let window = UsageWindow::new("Quota", (1.0 - lowest) * 100.0).reset(reset);
+    if has_quota {
+        window
+    } else {
+        window.text("quota unavailable")
     }
 }
 
@@ -1019,6 +1034,24 @@ mod tests {
         let usage = Fetcher::new(&http).fetch(&keyed("deepseek", "sk-ds"));
 
         assert_eq!(usage.footer, "Available: $15.00");
+        assert_eq!(usage.remaining_percent(), None);
+        assert_eq!(usage.windows[0].remaining_text(), "Balance only");
+    }
+
+    #[test]
+    fn openrouter_without_a_cap_has_no_remaining_percentage() {
+        for data in [
+            r#"{"usage":25.0}"#,
+            r#"{"usage":25.0,"limit":null}"#,
+            r#"{"usage":25.0,"limit":0}"#,
+        ] {
+            let body = format!("{{\"data\":{data}}}");
+            let http = FakeHttp::new(vec![("openrouter.ai", 200, &body)]);
+            let usage = Fetcher::new(&http).fetch(&keyed("openrouter", "sk-or"));
+            assert_eq!(usage.remaining_percent(), None);
+            assert_eq!(usage.windows[0].remaining_text(), "quota unavailable");
+            assert_eq!(usage.windows[0].used_percent, 0.0);
+        }
     }
 
     #[test]
@@ -1032,17 +1065,33 @@ mod tests {
 
     #[test]
     fn gemini_reports_the_most_depleted_bucket() {
-        let http = FakeHttp::new(vec![(
-            "cloudcode-pa",
-            200,
-            r#"{"buckets":[{"remainingFraction":0.8},{"remainingFraction":0.25}]}"#,
-        )]);
-        // Reached through the internal method so the test does not depend on
-        // whether this machine has a Gemini login.
-        let usage = Fetcher::new(&http).gemini();
+        let body = serde_json::json!({"buckets": [
+            {"remainingFraction": 0.8},
+            {"remainingFraction": 0.25}
+        ]});
+        let window = gemini_window(&body);
+        assert_eq!(window.used_percent, 75.0);
+        assert_eq!(window.remaining_percent(), Some(25.0));
+        assert_eq!(window.reset_countdown, "Daily Quota");
+    }
 
-        if usage.status == crate::model::Status::Healthy {
-            assert_eq!(usage.windows[0].used_percent, 75.0);
+    #[test]
+    fn gemini_without_numeric_buckets_is_not_a_full_allowance() {
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"buckets": []}),
+            serde_json::json!({"buckets": [{"remainingFraction": null}]}),
+            serde_json::json!({"buckets": [{"remainingFraction": "unknown", "resetTime": "invalid"}]}),
+        ] {
+            let window = gemini_window(&body);
+            assert_eq!(window.used_percent, 0.0);
+            assert_eq!(window.remaining_percent(), None);
+            assert_eq!(window.remaining_text(), "quota unavailable");
+        }
+        for (fraction, left) in [(1.0, 100.0), (0.0, 0.0)] {
+            let window =
+                gemini_window(&serde_json::json!({"buckets": [{"remainingFraction": fraction}]}));
+            assert_eq!(window.remaining_percent(), Some(left));
         }
     }
 

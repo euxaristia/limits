@@ -61,26 +61,34 @@ pub fn cyan(text: &str) -> String {
 
 /// Thresholds at which a bar changes colour: comfortable, getting tight, and
 /// nearly gone.
-pub fn severity_paint(percent: f64, text: &str) -> String {
+fn severity_code(percent: f64) -> &'static str {
     if percent > 90.0 {
-        red(text)
+        "31"
     } else if percent > 75.0 {
-        yellow(text)
+        "33"
     } else {
-        green(text)
+        "32"
     }
+}
+
+pub fn severity_paint(percent: f64, text: &str) -> String {
+    paint(severity_code(percent), text)
+}
+
+fn bar_cells(percent: f64, width: usize) -> String {
+    let clamped = percent.clamp(0.0, 100.0);
+    let filled = ((clamped / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    format!(
+        "[{}{}]",
+        "\u{2588}".repeat(filled),
+        "\u{2591}".repeat(width - filled)
+    )
 }
 
 pub fn progress_bar(percent: f64, width: usize) -> String {
     let clamped = percent.clamp(0.0, 100.0);
-    let filled = ((clamped / 100.0) * width as f64).round() as usize;
-    let filled = filled.min(width);
-    let bar = format!(
-        "[{}{}]",
-        "\u{2588}".repeat(filled),
-        "\u{2591}".repeat(width - filled)
-    );
-    severity_paint(clamped, &bar)
+    severity_paint(clamped, &bar_cells(clamped, width))
 }
 
 // ---- rendering -----------------------------------------------------------
@@ -111,12 +119,15 @@ fn render_window(out: &mut impl Write, width: usize, window: &UsageWindow) -> st
         "" => String::new(),
         text => dim(&format!(" ({text})")),
     };
+    let bar = match window.remaining_percent() {
+        Some(remaining) => severity_paint(window.used_percent, &bar_cells(remaining, 20)),
+        None => " ".repeat(22),
+    };
     writeln!(
         out,
-        "  {:<width$} {} {:>7}{reset}",
+        "  {:<width$} {bar} {:>11}{reset}",
         window.label,
-        progress_bar(window.used_percent, 20),
-        window.percent_text(),
+        window.remaining_text(),
     )
 }
 
@@ -526,6 +537,20 @@ mod tests {
     }
 
     #[test]
+    fn remaining_meter_severity_keeps_consumption_thresholds() {
+        for (used, code) in [
+            (0.0, "32"),
+            (75.0, "32"),
+            (75.1, "33"),
+            (90.0, "33"),
+            (90.1, "31"),
+            (100.0, "31"),
+        ] {
+            assert_eq!(severity_code(used), code);
+        }
+    }
+
+    #[test]
     fn the_bar_fills_in_proportion() {
         crate::cli::disable_color();
         assert_eq!(progress_bar(0.0, 4), "[░░░░]");
@@ -534,6 +559,67 @@ mod tests {
         // Out-of-range input must not produce a bar longer than the column.
         assert_eq!(progress_bar(140.0, 4), "[████]");
         assert_eq!(progress_bar(-5.0, 4), "[░░░░]");
+    }
+
+    #[test]
+    fn quota_rows_show_remaining_capacity_and_fill() {
+        crate::cli::disable_color();
+        for (used, left, filled) in [
+            (0.0, "100.0% left", 20),
+            (30.0, "70.0% left", 14),
+            (100.0, "0.0% left", 0),
+        ] {
+            let window = UsageWindow::new("Weekly", used).reset("5d 6h");
+            let mut out = Vec::new();
+            render_window(&mut out, 24, &window).unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains(left), "{text}");
+            assert_eq!(text.matches('█').count(), filled, "{text}");
+            assert_eq!(text.matches('░').count(), 20 - filled, "{text}");
+            assert!(text.contains("(5d 6h)"), "{text}");
+        }
+    }
+
+    #[test]
+    fn nonnumeric_quota_rows_have_no_meter() {
+        crate::cli::disable_color();
+        for state in [
+            "Unlimited",
+            "usage unavailable",
+            "Balance only",
+            "quota unavailable",
+        ] {
+            let mut out = Vec::new();
+            render_window(&mut out, 24, &UsageWindow::new("Quota", 0.0).text(state)).unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains(state), "{text}");
+            assert!(!text.contains('%'), "{text}");
+            assert!(!text.contains('█') && !text.contains('░'), "{text}");
+        }
+    }
+
+    #[test]
+    fn overrides_keep_counts_but_show_remaining_capacity() {
+        crate::cli::disable_color();
+        for (used, original, expected) in [
+            (88.0, "88% used", "12.0% left"),
+            (30.0, "70% remaining", "70.0% left"),
+            (2.0, "4 / 200 (2.0% used)", "4 / 200 used (98.0% left)"),
+        ] {
+            let mut out = Vec::new();
+            render_window(
+                &mut out,
+                24,
+                &UsageWindow::new("Quota", used).text(original),
+            )
+            .unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains(expected), "{text}");
+            assert!(
+                !text.contains("% used") && !text.contains("% remaining"),
+                "{text}"
+            );
+        }
     }
 
     #[test]
@@ -566,7 +652,8 @@ mod tests {
 
         assert!(text.contains("OpenCode Go [OK]"), "{text}");
         assert!(text.contains("Rolling"), "{text}");
-        assert!(text.contains("6.0%"), "{text}");
+        assert!(text.contains("94.0% left"), "{text}");
+        assert!(text.contains("0.0% left"), "{text}");
         assert!(text.contains("(2h 0m)"), "{text}");
         assert!(text.contains("OpenCode Go subscription"), "{text}");
     }

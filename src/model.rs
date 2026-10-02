@@ -308,6 +308,44 @@ impl UsageWindow {
         }
     }
 
+    /// Remaining capacity when this window reports a measurable allowance.
+    pub fn remaining_percent(&self) -> Option<f64> {
+        if !self.used_percent.is_finite() {
+            return None;
+        }
+        if let Some(text) = &self.percent_text_override {
+            let percent = text
+                .strip_suffix("% used")
+                .or_else(|| text.strip_suffix("% remaining"))
+                .or_else(|| {
+                    text.rsplit_once(" (")
+                        .and_then(|(_, percent)| percent.strip_suffix("% used)"))
+                });
+            if !percent.is_some_and(|value| value.parse::<f64>().is_ok_and(f64::is_finite)) {
+                return None;
+            }
+        }
+        Some(100.0 - self.used_percent.clamp(0.0, 100.0))
+    }
+
+    /// Human-facing capacity text, leaving legacy consumption text unchanged.
+    pub fn remaining_text(&self) -> String {
+        let Some(remaining) = self.remaining_percent() else {
+            return self
+                .percent_text_override
+                .clone()
+                .unwrap_or_else(|| "quota unavailable".to_string());
+        };
+        let percent = format!("{remaining:.1}% left");
+        if let Some(text) = &self.percent_text_override
+            && let Some((counts, _)) = text.rsplit_once(" (")
+            && text.ends_with("% used)")
+        {
+            return format!("{counts} used ({percent})");
+        }
+        percent
+    }
+
     pub fn is_spent(&self) -> bool {
         self.used_percent >= 100.0
     }
@@ -400,11 +438,11 @@ impl ProviderUsage {
         } else {
             0.0
         };
-        ProviderUsage::healthy(
-            provider,
-            vec![UsageWindow::new("Quota", percent).reset(reset)],
-            footer,
-        )
+        let mut window = UsageWindow::new("Quota", percent).reset(reset);
+        if limit <= 0.0 || !limit.is_finite() || !used.is_finite() {
+            window = window.text("quota unavailable");
+        }
+        ProviderUsage::healthy(provider, vec![window], footer)
     }
 
     /// True when every window this provider reports is spent, so nothing here
@@ -421,6 +459,14 @@ impl ProviderUsage {
             .iter()
             .map(|w| w.used_percent)
             .fold(0.0_f64, f64::max)
+    }
+
+    /// The lowest remaining capacity among measurable allowance windows.
+    pub fn remaining_percent(&self) -> Option<f64> {
+        self.windows
+            .iter()
+            .filter_map(UsageWindow::remaining_percent)
+            .reduce(f64::min)
     }
 
     /// The provider's own enum, recovered from the serialised id.
@@ -513,6 +559,107 @@ mod tests {
             assert!(json.contains(key), "missing {key} in {json}");
         }
         assert!(json.contains("\"healthy\""));
+    }
+
+    #[test]
+    fn remaining_capacity_is_bounded_and_preserves_consumption() {
+        for (used, left) in [
+            (0.0, 100.0),
+            (30.0, 70.0),
+            (99.5, 0.5),
+            (100.0, 0.0),
+            (-5.0, 100.0),
+            (150.0, 0.0),
+        ] {
+            let window = UsageWindow {
+                used_percent: used,
+                ..Default::default()
+            };
+            assert_eq!(window.remaining_percent(), Some(left));
+            assert_eq!(window.remaining_text(), format!("{left:.1}% left"));
+            assert_eq!(window.used_percent, used);
+            assert_eq!(window.percent_text(), format!("{used:.1}%"));
+            assert_eq!(window.is_spent(), used >= 100.0);
+        }
+        for used in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let window = UsageWindow {
+                used_percent: used,
+                ..Default::default()
+            };
+            assert_eq!(window.remaining_percent(), None);
+            assert_eq!(window.remaining_text(), "quota unavailable");
+        }
+    }
+
+    #[test]
+    fn remaining_overrides_do_not_change_legacy_text_or_json() {
+        for (used, original, expected) in [
+            (88.0, "88% used", "12.0% left"),
+            (30.0, "70% remaining", "70.0% left"),
+            (99.5, "0.5% remaining", "0.5% left"),
+            (2.0, "4 / 200 (2.0% used)", "4 / 200 used (98.0% left)"),
+            (
+                100.0,
+                "250 / 200 (100.0% used)",
+                "250 / 200 used (0.0% left)",
+            ),
+        ] {
+            let window = UsageWindow::new("Quota", used).text(original);
+            assert_eq!(window.remaining_text(), expected);
+            assert_eq!(window.percent_text(), original);
+            let json = serde_json::to_value(&window).unwrap();
+            assert_eq!(json["UsedPercent"], used);
+            assert_eq!(json["PercentTextOverride"], original);
+            let restored: UsageWindow = serde_json::from_value(json).unwrap();
+            assert_eq!(restored.remaining_text(), expected);
+        }
+    }
+
+    #[test]
+    fn categorical_overrides_are_not_measurable_allowances() {
+        for text in [
+            "Unlimited",
+            "usage unavailable",
+            "quota unavailable",
+            "Balance only",
+            "Custom quota",
+            "NaN% used",
+            "not a number% remaining",
+        ] {
+            let window = UsageWindow::new("Quota", 0.0).text(text);
+            assert_eq!(window.remaining_percent(), None, "{text}");
+            assert_eq!(window.remaining_text(), text);
+        }
+    }
+
+    #[test]
+    fn provider_remaining_capacity_uses_the_tightest_measurable_window() {
+        let mut usage = ProviderUsage::healthy(Provider::Copilot, vec![], "");
+        assert_eq!(usage.remaining_percent(), None);
+        usage
+            .windows
+            .push(UsageWindow::new("Completions", 0.0).text("Unlimited"));
+        assert_eq!(usage.remaining_percent(), None);
+        usage
+            .windows
+            .push(UsageWindow::new("Unknown", 0.0).text("usage unavailable"));
+        assert_eq!(usage.remaining_percent(), None);
+        usage.windows.push(UsageWindow::new("Chat", 30.0));
+        usage.windows.push(UsageWindow::new("Premium", 80.0));
+        assert_eq!(usage.remaining_percent(), Some(20.0));
+        assert_eq!(usage.peak_percent(), 80.0);
+        assert!(!usage.is_exhausted());
+    }
+
+    #[test]
+    fn a_balance_without_a_denominator_has_no_remaining_percentage() {
+        for limit in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let usage =
+                ProviderUsage::from_balance(Provider::OpenRouter, 5.0, limit, "N/A", "Used: $5.00");
+            assert_eq!(usage.remaining_percent(), None);
+            assert_eq!(usage.windows[0].remaining_text(), "quota unavailable");
+            assert_eq!(usage.footer, "Used: $5.00");
+        }
     }
 
     #[test]

@@ -82,7 +82,11 @@ limits config set-key opencode sk-...
 
 ### The dashboard
 
-`limits tui` (or `limits watch`) opens a full-screen view: a provider list on the left, ranked by urgency, and a detail pane on the right with a gauge and a resets-in countdown per window, ticking live between reads. Keys: `j`/`k` or the arrows to select, `r` to refresh now, `a` to toggle hidden errors, `+`/`-` to change the poll interval, `q` to quit.
+`limits tui` (or `limits watch`) opens a full-screen view: a provider list on the left, with usable providers before exhausted ones, and a detail pane on the right with a gauge and a resets-in countdown per window, ticking live between reads. The CLI and TUI show **percent left**, and their bars fill in proportion to remaining capacity: 30% used becomes 70% left. The provider summary shows the lowest remaining capacity across measurable windows, and the trend tracks that capacity over time. Low remaining capacity still triggers warning colors. Unlimited, unavailable, and balance-only readings show text instead of a numeric meter.
+
+Keys: `j`/`k` or the arrows to select, `r` to refresh now, `a` to toggle hidden errors, `+`/`-` to change the poll interval, `q` to quit.
+
+JSON remains consumption-based: `UsedPercent` and existing numeric `PercentTextOverride` strings retain their meanings. Balance-only and unavailable quota placeholders carry descriptive `PercentTextOverride` values instead of implying a measurable allowance.
 
 ---
 
@@ -91,9 +95,13 @@ limits config set-key opencode sk-...
 ```rust
 let limits = limits::Limits::new();
 for usage in limits.snapshot() {
-    println!("{}: {:.0}% used", usage.display_name, usage.peak_percent());
+    if let Some(left) = usage.remaining_percent() {
+        println!("{}: {:.1}% left", usage.display_name, left);
+    }
 }
 ```
+
+`remaining_percent()` returns `None` when no window reports a measurable quota. For individual windows, `remaining_text()` also preserves nonnumeric states and consumed counts. The raw `used_percent` fields and `peak_percent()` remain available for consumption-based logic.
 
 Nothing in this crate opens a socket directly — every request goes through the [`HttpClient`](src/http.rs) trait. Without a custom implementation, [`CurlClient`] is used, which needs only `curl` on `PATH`. A host application with its own hardened HTTP path (like [cairn-code](#cairn-code-integration)) can supply its own client instead of pulling in a second stack:
 
