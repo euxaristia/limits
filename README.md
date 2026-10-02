@@ -84,6 +84,10 @@ limits config set-key opencode sk-...
 
 `limits tui` (or `limits watch`) opens a full-screen view: a provider list on the left, with usable providers before exhausted ones, and a detail pane on the right with a gauge and a resets-in countdown per window, ticking live between reads. The CLI and TUI show **percent left**, and their bars fill in proportion to remaining capacity: 30% used becomes 70% left. The provider summary shows the lowest remaining capacity across measurable windows, and the trend tracks that capacity over time. Low remaining capacity still triggers warning colors. Unlimited, unavailable, and balance-only readings show text instead of a numeric meter.
 
+Usable providers are ordered by detected plan tier: Max-family plans and SuperGrok Heavy first; Pro-family plans (including Codex Pro Lite and Copilot Pro) and SuperGrok next; lower or unknown plans afterward. Equal tiers use the existing provider priority: Claude, Grok, Antigravity, Codex, then OpenCode Go. Other ties keep their previous relative order. Fully exhausted providers stay last, ordered by soonest reset, with unknown reset times last. This is a name-based preference, not a comparison of prices or quotas. Selection stays on the same provider when a refresh changes the order.
+
+Plan names are formatted for display, so Codex's `prolite` appears as `Pro Lite`. Grok's plan comes from the optional `/v1/settings` lookup, preferring `subscription_tier_display` over `subscription_tier`, as the [official CLI does](https://github.com/xai-org/grok-build/blob/2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8/crates/codegen/xai-grok-shell/src/extensions/billing.rs#L252-L259). This adds one best-effort request per Grok refresh. If it fails or reports no plan, quotas still work and the tier remains unknown. Unknown identifiers are not guessed from usage percentages or credentials. Providers without a detected plan, including Claude Web, retain the fallback priority. `limits providers` is a config-only listing and does not fetch or rank plans.
+
 Keys: `j`/`k` or the arrows to select, `r` to refresh now, `a` to toggle hidden errors, `+`/`-` to change the poll interval, `q` to quit.
 
 JSON remains consumption-based: `UsedPercent` and existing numeric `PercentTextOverride` strings retain their meanings. Balance-only and unavailable quota placeholders carry descriptive `PercentTextOverride` values instead of implying a measurable allowance.
@@ -102,6 +106,8 @@ for usage in limits.snapshot() {
 ```
 
 `remaining_percent()` returns `None` when no window reports a measurable quota. For individual windows, `remaining_text()` also preserves nonnumeric states and consumed counts. The raw `used_percent` fields and `peak_percent()` remain available for consumption-based logic.
+
+`ProviderUsage::plan` carries optional live `SubscriptionPlan` metadata (identifier, readable name, and `PlanTier`). Constructors initialize it to `None`; `with_plan()` attaches a provider-reported plan. Adding this field requires callers using `ProviderUsage` struct literals to supply `plan: None` or a plan value. Constructor signatures are unchanged. Plan metadata is skipped during serialization, preserving the existing JSON field set. JSON-deserialized readings have no plan metadata, so tier-based ordering requires fresh readings or explicitly attached plans.
 
 Nothing in this crate opens a socket directly — every request goes through the [`HttpClient`](src/http.rs) trait. Without a custom implementation, [`CurlClient`] is used, which needs only `curl` on `PATH`. A host application with its own hardened HTTP path (like [cairn-code](#cairn-code-integration)) can supply its own client instead of pulling in a second stack:
 
@@ -150,7 +156,7 @@ limits/
 │   ├── http.rs           # The HttpClient trait + the default CurlClient
 │   ├── fetch.rs           # Per-provider usage fetching over HttpClient
 │   ├── parsers/           # Response parsing per provider (unit tested against fixtures)
-│   ├── sort.rs             # Display ordering: usable first, exhausted by soonest reset
+│   ├── sort.rs             # Display ordering: usable by plan tier, exhausted by reset
 │   ├── time.rs             # RFC 3339 parsing and countdown formatting, no date crate
 │   ├── redact.rs           # Email masking for footers and JSON output
 │   ├── cli.rs (feature)     # Argument parsing, ANSI rendering, the `status` report

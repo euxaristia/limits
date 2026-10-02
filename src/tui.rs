@@ -179,6 +179,9 @@ impl App {
     }
 
     fn apply(&mut self, results: Vec<ProviderUsage>) {
+        let selected_id = self
+            .selected_provider()
+            .map(|provider| provider.usage.id.clone());
         let fetched_at = now_unix();
         for usage in &results {
             // A provider that reported nothing contributes no point, so a
@@ -205,6 +208,14 @@ impl App {
             .collect();
         self.reading = false;
         self.last_read = Some(Instant::now());
+        if let Some(id) = selected_id
+            && let Some(index) = self
+                .visible()
+                .iter()
+                .position(|provider| provider.usage.id == id)
+        {
+            self.selected = index;
+        }
         self.clamp_selection();
     }
 
@@ -747,6 +758,22 @@ mod tests {
     }
 
     #[test]
+    fn selection_stays_on_the_provider_when_plan_order_changes() {
+        let mut results = vec![
+            healthy("claude", 10.0, "1h 0m"),
+            healthy("codex", 30.0, "1h 0m"),
+        ];
+        let mut app = App::new(60);
+        app.apply(results.clone());
+        assert_eq!(app.selected_provider().unwrap().usage.id, "claude");
+        results[1] = results[1].clone().with_plan("prolite");
+        crate::sort::sort_results(&mut results);
+        app.apply(results);
+        assert_eq!(app.providers[0].usage.id, "codex");
+        assert_eq!(app.selected_provider().unwrap().usage.id, "claude");
+    }
+
+    #[test]
     fn selection_survives_the_list_shrinking() {
         let mut app = App::new(60);
         app.show_all = true;
@@ -878,6 +905,30 @@ mod tests {
 
     fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
         buffer.content().iter().map(|cell| cell.symbol()).collect()
+    }
+
+    #[test]
+    fn a_frame_keeps_plan_order_and_shows_the_readable_plan_name() {
+        let mut results = vec![
+            ProviderUsage::healthy(
+                Provider::Claude,
+                vec![UsageWindow::new("Session", 10.0)],
+                "",
+            ),
+            ProviderUsage::healthy(
+                Provider::Codex,
+                vec![UsageWindow::new("Session", 30.0)],
+                "ChatGPT Pro Lite",
+            )
+            .with_plan("prolite"),
+        ];
+        crate::sort::sort_results(&mut results);
+        let mut app = App::new(60);
+        app.apply(results);
+        assert_eq!(app.providers[0].usage.id, "codex");
+        let text = render(&app, 120, 28);
+        assert!(text.contains("ChatGPT Pro Lite"), "{text}");
+        assert!(text.contains("70.0% left"), "{text}");
     }
 
     #[test]

@@ -659,6 +659,31 @@ mod tests {
     }
 
     #[test]
+    fn the_report_keeps_plan_order_and_readable_plan_footers() {
+        crate::cli::disable_color();
+        let mut results = vec![
+            ProviderUsage::healthy(
+                Provider::Claude,
+                vec![UsageWindow::new("Session", 10.0)],
+                "",
+            ),
+            ProviderUsage::healthy(
+                Provider::Codex,
+                vec![UsageWindow::new("Session", 30.0)],
+                "ChatGPT Pro Lite",
+            )
+            .with_plan("prolite"),
+        ];
+        crate::sort::sort_results(&mut results);
+        let mut out = Vec::new();
+        render_report(&mut out, &results).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.find("Codex [OK]").unwrap() < text.find("Claude [OK]").unwrap());
+        assert!(text.contains("ChatGPT Pro Lite"));
+        assert!(text.contains("70.0% left"));
+    }
+
+    #[test]
     fn an_unconfigured_provider_shows_its_setup_hint_not_a_bar() {
         crate::cli::disable_color();
         let mut out = Vec::new();

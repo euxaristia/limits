@@ -8,7 +8,7 @@
 
 use crate::credentials::{self, Token};
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
-use crate::model::{Provider, ProviderConfig, ProviderUsage, UsageWindow};
+use crate::model::{Provider, ProviderConfig, ProviderUsage, SubscriptionPlan, UsageWindow};
 use crate::parsers::{antigravity, claude, codex, copilot, opencode};
 use crate::time::{WEEK, format_countdown, now_unix};
 use serde_json::Value;
@@ -76,6 +76,10 @@ impl<'a> Fetcher<'a> {
             return ProviderUsage::unconfigured(Provider::Codex);
         };
 
+        self.codex_usage(&token)
+    }
+
+    fn codex_usage(&self, token: &Token) -> ProviderUsage {
         let request = HttpRequest::get("https://chatgpt.com/backend-api/wham/usage")
             .bearer(&token.access_token)
             .header("User-Agent", "codex-cli")
@@ -101,16 +105,21 @@ impl<'a> Fetcher<'a> {
             Err(message) => return ProviderUsage::degraded(Provider::Codex, message),
         };
 
-        let plan = first_non_empty(&[&usage.plan_type, &token.plan_type]);
+        let plan = SubscriptionPlan::new(
+            Provider::Codex,
+            &first_non_empty(&[&usage.plan_type, &token.plan_type]),
+        );
         let mut footer = "ChatGPT".to_string();
-        if !plan.is_empty() {
+        if let Some(plan) = &plan {
             footer.push(' ');
-            footer.push_str(&plan);
+            footer.push_str(&plan.display_name);
         }
         if !token.email.is_empty() {
             footer = format!("{footer} ({})", token.email);
         }
-        ProviderUsage::healthy(Provider::Codex, usage.windows, footer)
+        let mut result = ProviderUsage::healthy(Provider::Codex, usage.windows, footer);
+        result.plan = plan;
+        result
     }
 
     // ---- Claude ----------------------------------------------------------
@@ -165,8 +174,16 @@ impl<'a> Fetcher<'a> {
         if email.is_empty() {
             email = self.claude_profile_email(&token.access_token);
         }
-        let footer = account_footer("Claude CLI", &[&email, &title_case(&token.plan_type)]);
-        ProviderUsage::healthy(Provider::Claude, claude::parse(&response.body), footer)
+        let plan = SubscriptionPlan::new(Provider::Claude, &token.plan_type);
+        let name = plan
+            .as_ref()
+            .map(|plan| plan.display_name.as_str())
+            .unwrap_or_default();
+        let footer = account_footer("Claude CLI", &[&email, name]);
+        let mut result =
+            ProviderUsage::healthy(Provider::Claude, claude::parse(&response.body), footer);
+        result.plan = plan;
+        result
     }
 
     fn claude_web(&self, cookie_source: &str) -> ProviderUsage {
@@ -551,9 +568,13 @@ impl<'a> Fetcher<'a> {
             return ProviderUsage::unconfigured(Provider::Grok);
         }
 
+        self.grok_usage(&bearer, token.as_ref())
+    }
+
+    fn grok_usage(&self, bearer: &str, token: Option<&Token>) -> ProviderUsage {
         let grok_request = |url: &str| {
             HttpRequest::get(url)
-                .bearer(&bearer)
+                .bearer(bearer)
                 .header("User-Agent", "grok/0.2.111")
                 .header("x-grok-client-version", "0.2.111")
                 .header("Accept", "application/json")
@@ -567,7 +588,7 @@ impl<'a> Fetcher<'a> {
             Err(message) => return ProviderUsage::degraded(Provider::Grok, message),
         };
 
-        let email = match token.as_ref().map(|t| t.email.clone()) {
+        let email = match token.map(|t| t.email.clone()) {
             Some(email) if !email.is_empty() => email,
             _ => user
                 .json()
@@ -580,7 +601,7 @@ impl<'a> Fetcher<'a> {
         // stand-in until it answers. `None` means it never answered, which is
         // not the same as a window that has gone unspent.
         let mut used_percent = None;
-        let mut reset = match token.as_ref().and_then(|t| t.expires_at) {
+        let mut reset = match token.and_then(|t| t.expires_at) {
             Some(expiry) => crate::time::countdown_between(expiry, now_unix()),
             None => "Active".to_string(),
         };
@@ -600,6 +621,25 @@ impl<'a> Fetcher<'a> {
             }
         }
 
+        let plan = self
+            .probe_json(grok_request("https://cli-chat-proxy.grok.com/v1/settings"))
+            .and_then(|settings| {
+                let name = first_non_empty(&[
+                    settings
+                        .get("subscription_tier_display")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    settings
+                        .get("subscription_tier")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                ]);
+                SubscriptionPlan::new(Provider::Grok, &name)
+            });
+        let name = plan
+            .as_ref()
+            .map(|plan| plan.display_name.as_str())
+            .unwrap_or_default();
         let account = if email.is_empty() { "Active" } else { &email };
         let window = match used_percent {
             Some(percent) => {
@@ -607,11 +647,14 @@ impl<'a> Fetcher<'a> {
             }
             None => UsageWindow::new("Weekly", 0.0).text("usage unavailable"),
         };
-        ProviderUsage::healthy(
+        let footer = account_footer("Grok CLI", &[account, name]);
+        let mut result = ProviderUsage::healthy(
             Provider::Grok,
             vec![window.reset(reset).seconds(WEEK)],
-            format!("Grok CLI ({account})"),
-        )
+            footer,
+        );
+        result.plan = plan;
+        result
     }
 
     // ---- GitHub Copilot ---------------------------------------------------
@@ -654,17 +697,23 @@ impl<'a> Fetcher<'a> {
             ("", email) => email.to_string(),
             (login, email) => format!("{login}, {email}"),
         };
-        let plan = payload.plan_label();
-        let mut footer = if plan.is_empty() {
+        let plan = SubscriptionPlan::new(Provider::Copilot, payload.plan_label());
+        let name = plan
+            .as_ref()
+            .map(|plan| plan.display_name.as_str())
+            .unwrap_or_default();
+        let mut footer = if name.is_empty() {
             format!("GitHub Copilot (User: {user})")
         } else {
-            format!("GitHub Copilot (User: {user}, Plan: {plan})")
+            format!("GitHub Copilot (User: {user}, Plan: {name})")
         };
         if exhausted {
             footer.push_str(" - Quota Exceeded");
         }
 
-        ProviderUsage::healthy(Provider::Copilot, windows, footer)
+        let mut result = ProviderUsage::healthy(Provider::Copilot, windows, footer);
+        result.plan = plan;
+        result
     }
 
     fn github_email(&self, bearer: &str) -> String {
@@ -767,14 +816,6 @@ fn plural(count: usize, noun: &str) -> String {
         format!("{count} {noun}")
     } else {
         format!("{count} {noun}s")
-    }
-}
-
-fn title_case(value: &str) -> String {
-    let mut chars = value.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
     }
 }
 
@@ -892,6 +933,94 @@ mod tests {
         "monthly":{"status":"ok","percent":50,"resetsAt":"2099-09-12T22:42:28.112Z"}
     }}"#;
 
+    #[test]
+    fn codex_pro_lite_has_a_readable_plan_name() {
+        let http = FakeHttp::new(vec![(
+            "wham/usage",
+            200,
+            r#"{"plan_type":"prolite","rate_limit":{"primary_window":{"used_percent":30}}}"#,
+        )]);
+        let token = Token {
+            access_token: "test-token".into(),
+            email: "reader@example.com".into(),
+            ..Default::default()
+        };
+        let usage = Fetcher::new(&http).codex_usage(&token);
+        assert_eq!(usage.footer, "ChatGPT Pro Lite (r***r@example.com)");
+        let plan = usage.plan.unwrap();
+        assert_eq!(plan.id, "prolite");
+        assert_eq!(plan.tier, crate::model::PlanTier::Pro);
+    }
+
+    #[test]
+    fn codex_prefers_the_response_plan_and_falls_back_to_the_token() {
+        for (reported, token_plan, expected) in [
+            ("prolite", "plus", "Pro Lite"),
+            ("", "prolite", "Pro Lite"),
+            ("  ", "pro", "Pro"),
+            ("", "", ""),
+        ] {
+            let body = serde_json::json!({
+                "plan_type": reported,
+                "rate_limit": {"primary_window": {"used_percent": 30}}
+            })
+            .to_string();
+            let http = FakeHttp::new(vec![("wham/usage", 200, &body)]);
+            let token = Token {
+                access_token: "test-token".into(),
+                account_id: "test-account".into(),
+                plan_type: token_plan.into(),
+                ..Default::default()
+            };
+            let usage = Fetcher::new(&http).codex_usage(&token);
+            assert_eq!(
+                usage
+                    .plan
+                    .as_ref()
+                    .map(|plan| plan.display_name.as_str())
+                    .unwrap_or_default(),
+                expected,
+            );
+            let footer = if expected.is_empty() {
+                "ChatGPT".into()
+            } else {
+                format!("ChatGPT {expected}")
+            };
+            assert_eq!(usage.footer, footer);
+            assert_eq!(
+                http.header_for("wham/usage", "ChatGPT-Account-Id")
+                    .as_deref(),
+                Some("test-account")
+            );
+        }
+    }
+
+    #[test]
+    fn claude_oauth_retains_the_plan_and_formats_its_name() {
+        for (id, name, tier) in [
+            ("max", "Max", crate::model::PlanTier::Max),
+            ("pro", "Pro", crate::model::PlanTier::Pro),
+        ] {
+            let http = FakeHttp::new(vec![(
+                "oauth/usage",
+                200,
+                r#"{"five_hour":{"utilization":30}}"#,
+            )]);
+            let token = Token {
+                access_token: "test-token".into(),
+                email: "reader@example.com".into(),
+                plan_type: id.into(),
+                ..Default::default()
+            };
+            let usage = Fetcher::new(&http).claude_oauth(&token);
+            assert_eq!(
+                usage.footer,
+                format!("Claude CLI (r***r@example.com, {name})")
+            );
+            assert_eq!(usage.plan.unwrap().tier, tier);
+        }
+    }
+
     const GROK_USER: &str = r#"{"email":"grokuser@example.com"}"#;
 
     #[test]
@@ -912,7 +1041,7 @@ mod tests {
     fn grok_billing_that_never_answers_reports_unavailable_rather_than_zero() {
         // Only the user call is routed; billing gets no route and so errors.
         let http = FakeHttp::new(vec![("v1/user", 200, GROK_USER)]);
-        let usage = Fetcher::new(&http).fetch(&keyed("grok", "xai-test-key"));
+        let usage = Fetcher::new(&http).grok_usage("xai-test-key", None);
 
         assert_eq!(usage.status, crate::model::Status::Healthy);
         let window = &usage.windows[0];
@@ -931,10 +1060,110 @@ mod tests {
             ("v1/billing", 200, billing),
             ("v1/user", 200, GROK_USER),
         ]);
-        let usage = Fetcher::new(&http).fetch(&keyed("grok", "xai-test-key"));
+        let usage = Fetcher::new(&http).grok_usage("xai-test-key", None);
 
         assert_eq!(usage.windows[0].percent_text(), "88% used");
         assert_eq!(usage.windows[0].used_percent, 88.0);
+    }
+
+    #[test]
+    fn grok_reads_the_verified_settings_plan_fields() {
+        for (settings, name, tier) in [
+            (
+                r#"{"subscription_tier_display":"SuperGrok Heavy","subscription_tier":"supergrok"}"#,
+                "SuperGrok Heavy",
+                crate::model::PlanTier::Max,
+            ),
+            (
+                r#"{"subscription_tier_display":"  ","subscription_tier":"supergrok_heavy"}"#,
+                "SuperGrok Heavy",
+                crate::model::PlanTier::Max,
+            ),
+            (
+                r#"{"subscription_tier":"supergrok"}"#,
+                "SuperGrok",
+                crate::model::PlanTier::Pro,
+            ),
+            (
+                r#"{"subscription_tier":"supergrok_lite"}"#,
+                "SuperGrok Lite",
+                crate::model::PlanTier::Other,
+            ),
+            (
+                r#"{"subscription_tier_display":"Unrecognized Plan"}"#,
+                "Unrecognized Plan",
+                crate::model::PlanTier::Other,
+            ),
+        ] {
+            let http = FakeHttp::new(vec![
+                ("v1/user", 200, GROK_USER),
+                (
+                    "v1/billing",
+                    200,
+                    r#"{"config":{"creditUsagePercent":25.0}}"#,
+                ),
+                ("v1/settings", 200, settings),
+            ]);
+            let usage = Fetcher::new(&http).grok_usage("test-token", None);
+            assert_eq!(usage.status, crate::model::Status::Healthy);
+            assert_eq!(usage.windows[0].used_percent, 25.0);
+            assert_eq!(
+                usage.footer,
+                format!("Grok CLI (g***r@example.com, {name})")
+            );
+            let plan = usage.plan.unwrap();
+            assert_eq!(plan.display_name, name);
+            assert_eq!(plan.tier, tier);
+            assert_eq!(
+                http.header_for("v1/settings", "Authorization").as_deref(),
+                Some("Bearer test-token")
+            );
+            assert_eq!(http.request_count(), 3);
+        }
+    }
+
+    #[test]
+    fn grok_settings_failure_or_missing_plan_does_not_degrade_usage() {
+        for (status, settings) in [
+            (403, "forbidden"),
+            (200, "not json"),
+            (200, "{}"),
+            (
+                200,
+                r#"{"subscription_tier_display":null,"subscription_tier":null}"#,
+            ),
+            (
+                200,
+                r#"{"subscription_tier_display":42,"subscription_tier":[]}"#,
+            ),
+        ] {
+            let http = FakeHttp::new(vec![
+                ("v1/user", 200, GROK_USER),
+                (
+                    "v1/billing",
+                    200,
+                    r#"{"config":{"creditUsagePercent":25.0}}"#,
+                ),
+                ("v1/settings", status, settings),
+            ]);
+            let usage = Fetcher::new(&http).grok_usage("test-token", None);
+            assert_eq!(usage.status, crate::model::Status::Healthy);
+            assert_eq!(usage.windows[0].used_percent, 25.0);
+            assert_eq!(usage.footer, "Grok CLI (g***r@example.com)");
+            assert_eq!(usage.plan, None);
+        }
+    }
+
+    #[test]
+    fn grok_does_not_infer_a_plan_from_unmapped_user_identifiers() {
+        let http = FakeHttp::new(vec![(
+            "v1/user",
+            200,
+            r#"{"subscriptionTier":"SuperGrokPro"}"#,
+        )]);
+        let usage = Fetcher::new(&http).grok_usage("test-token", None);
+        assert_eq!(usage.status, crate::model::Status::Healthy);
+        assert_eq!(usage.plan, None);
     }
 
     #[test]
@@ -1123,6 +1352,9 @@ mod tests {
             usage.footer,
             "GitHub Copilot (User: octocat, c***t@example.com, Plan: Copilot Pro)"
         );
+        let plan = usage.plan.unwrap();
+        assert_eq!(plan.display_name, "Copilot Pro");
+        assert_eq!(plan.tier, crate::model::PlanTier::Pro);
     }
 
     #[test]

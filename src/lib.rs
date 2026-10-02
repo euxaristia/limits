@@ -59,7 +59,10 @@ pub mod cli;
 pub mod tui;
 
 pub use http::{CurlClient, HttpClient, HttpError, HttpRequest, HttpResponse, Method};
-pub use model::{LimitsConfig, Provider, ProviderConfig, ProviderUsage, Status, UsageWindow};
+pub use model::{
+    LimitsConfig, PlanTier, Provider, ProviderConfig, ProviderUsage, Status, SubscriptionPlan,
+    UsageWindow,
+};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

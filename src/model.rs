@@ -351,6 +351,87 @@ impl UsageWindow {
     }
 }
 
+/// Name-based priority, not a comparison of prices or quota sizes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PlanTier {
+    #[default]
+    Other,
+    Pro,
+    Max,
+}
+
+/// A provider's plan identifier and its human-facing name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionPlan {
+    pub id: String,
+    pub display_name: String,
+    pub tier: PlanTier,
+}
+
+impl SubscriptionPlan {
+    pub fn new(provider: Provider, id: &str) -> Option<Self> {
+        let id = id.trim();
+        if id.is_empty() {
+            return None;
+        }
+        let normalized = id
+            .to_ascii_lowercase()
+            .replace(['_', '-'], " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let name = if provider == Provider::Copilot {
+            normalized.strip_prefix("copilot ").unwrap_or(&normalized)
+        } else {
+            &normalized
+        };
+        let (name, tier) = match (provider, name) {
+            (Provider::Codex, "prolite" | "pro lite") => ("pro lite", PlanTier::Pro),
+            (Provider::Codex, "plus") => ("Plus", PlanTier::Other),
+            (Provider::Grok, "supergrok" | "super grok") => ("SuperGrok", PlanTier::Pro),
+            (Provider::Grok, "supergrok heavy" | "super grok heavy") => {
+                ("SuperGrok Heavy", PlanTier::Max)
+            }
+            (Provider::Grok, "supergrok plus" | "super grok plus") => {
+                ("SuperGrok Plus", PlanTier::Other)
+            }
+            (Provider::Grok, "supergrok lite" | "super grok lite") => {
+                ("SuperGrok Lite", PlanTier::Other)
+            }
+            (_, name) => match name.split_whitespace().next() {
+                Some("max") => (name, PlanTier::Max),
+                Some("pro" | "pro+") => (name, PlanTier::Pro),
+                _ => (id, PlanTier::Other),
+            },
+        };
+        let display_name = if name.starts_with("SuperGrok") || tier == PlanTier::Other {
+            name.to_string()
+        } else {
+            let title = name
+                .split_whitespace()
+                .map(|word| {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            if provider == Provider::Copilot {
+                format!("Copilot {title}")
+            } else {
+                title
+            }
+        };
+        Some(SubscriptionPlan {
+            id: id.to_string(),
+            display_name,
+            tier,
+        })
+    }
+}
+
 /// A complete reading for one provider.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderUsage {
@@ -372,6 +453,9 @@ pub struct ProviderUsage {
     pub error_message: String,
     #[serde(rename = "Footer")]
     pub footer: String,
+    /// Live plan metadata, omitted from the legacy JSON contract.
+    #[serde(skip)]
+    pub plan: Option<SubscriptionPlan>,
 }
 
 impl ProviderUsage {
@@ -391,6 +475,7 @@ impl ProviderUsage {
             has_error: false,
             error_message: String::new(),
             footer: crate::redact::redact_emails(&footer.into()),
+            plan: None,
         }
     }
 
@@ -406,6 +491,7 @@ impl ProviderUsage {
             has_error: true,
             error_message: crate::redact::redact_emails(&message.into()),
             footer: String::new(),
+            plan: None,
         }
     }
 
@@ -421,7 +507,14 @@ impl ProviderUsage {
             has_error: true,
             error_message: provider.setup_hint().to_string(),
             footer: String::new(),
+            plan: None,
         }
+    }
+
+    /// Attach a provider-reported plan without changing the serialized reading.
+    pub fn with_plan(mut self, id: &str) -> Self {
+        self.plan = SubscriptionPlan::new(self.provider_kind(), id);
+        self
     }
 
     /// A single window derived from a used/limit pair, as balance-style
@@ -526,6 +619,69 @@ mod tests {
 
         let silent = ProviderUsage::healthy(Provider::Codex, vec![], "");
         assert!(!silent.is_exhausted());
+    }
+
+    #[test]
+    fn plan_names_and_priority_follow_recognized_families() {
+        for (provider, id, name, tier) in [
+            (Provider::Codex, "prolite", "Pro Lite", PlanTier::Pro),
+            (Provider::Codex, "  PRO_LITE  ", "Pro Lite", PlanTier::Pro),
+            (Provider::Codex, "pro", "Pro", PlanTier::Pro),
+            (Provider::Claude, "max", "Max", PlanTier::Max),
+            (Provider::Claude, "max_20x", "Max 20x", PlanTier::Max),
+            (Provider::Claude, "pro", "Pro", PlanTier::Pro),
+            (
+                Provider::Copilot,
+                "Copilot Pro",
+                "Copilot Pro",
+                PlanTier::Pro,
+            ),
+            (
+                Provider::Copilot,
+                "copilot_pro+",
+                "Copilot Pro+",
+                PlanTier::Pro,
+            ),
+            (Provider::Grok, "SuperGrok", "SuperGrok", PlanTier::Pro),
+            (
+                Provider::Grok,
+                "super_grok_heavy",
+                "SuperGrok Heavy",
+                PlanTier::Max,
+            ),
+        ] {
+            let plan = SubscriptionPlan::new(provider, id).unwrap();
+            assert_eq!(plan.id, id.trim());
+            assert_eq!(plan.display_name, name);
+            assert_eq!(plan.tier, tier);
+        }
+    }
+
+    #[test]
+    fn unknown_plan_names_are_preserved_without_premium_priority() {
+        for id in ["maximum", "professional", "custom pro", "  Experimental  "] {
+            let plan = SubscriptionPlan::new(Provider::Codex, id).unwrap();
+            assert_eq!(plan.display_name, id.trim());
+            assert_eq!(plan.tier, PlanTier::Other);
+        }
+        assert_eq!(SubscriptionPlan::new(Provider::Codex, "  "), None);
+    }
+
+    #[test]
+    fn plan_metadata_does_not_change_the_json_contract() {
+        let usage = ProviderUsage::healthy(
+            Provider::Codex,
+            vec![UsageWindow::new("Session", 30.0).text("30% used")],
+            "ChatGPT Pro Lite",
+        );
+        let legacy = serde_json::to_value(&usage).unwrap();
+        let planned = usage.with_plan("prolite");
+        assert!(planned.plan.is_some());
+        assert_eq!(serde_json::to_value(&planned).unwrap(), legacy);
+        let restored: ProviderUsage = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.plan, None);
+        assert_eq!(restored.windows[0].used_percent, 30.0);
+        assert_eq!(restored.windows[0].percent_text(), "30% used");
     }
 
     #[test]

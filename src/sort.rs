@@ -34,8 +34,8 @@ fn soonest_reset(usage: &ProviderUsage) -> Option<i64> {
         .min()
 }
 
-/// Order readings: usable providers first, then spent ones by who recovers
-/// soonest.
+/// Order readings: usable providers by plan tier, then spent ones by who
+/// recovers soonest. Provider priority breaks ties.
 pub fn sort_results(results: &mut [ProviderUsage]) {
     results.sort_by(|a, b| {
         let (a_spent, b_spent) = (a.is_exhausted(), b.is_exhausted());
@@ -43,7 +43,9 @@ pub fn sort_results(results: &mut [ProviderUsage]) {
             .cmp(&b_spent)
             .then_with(|| {
                 if !a_spent {
-                    return std::cmp::Ordering::Equal;
+                    let a_tier = a.plan.as_ref().map(|plan| plan.tier).unwrap_or_default();
+                    let b_tier = b.plan.as_ref().map(|plan| plan.tier).unwrap_or_default();
+                    return b_tier.cmp(&a_tier);
                 }
                 // A provider that says when it comes back is more useful than
                 // one that does not, so an unknown reset sorts last.
@@ -159,6 +161,84 @@ mod tests {
         sort_results(&mut results);
 
         assert_eq!(ids(&results), ["sooner", "later"]);
+    }
+
+    #[test]
+    fn usable_providers_put_larger_plans_before_provider_priority() {
+        let mut results = vec![
+            usage("claude", vec![UsageWindow::new("Session", 10.0)]).with_plan("free"),
+            usage("codex", vec![UsageWindow::new("Session", 10.0)]).with_plan("prolite"),
+            usage("grok", vec![UsageWindow::new("Weekly", 10.0)]).with_plan("SuperGrok Heavy"),
+        ];
+        sort_results(&mut results);
+        assert_eq!(ids(&results), ["grok", "codex", "claude"]);
+    }
+
+    #[test]
+    fn equal_plan_tiers_keep_provider_priority_and_stable_order() {
+        let mut results = vec![
+            usage("grok", vec![]).with_plan("SuperGrok"),
+            usage("codex", vec![]).with_plan("prolite"),
+            usage("claude", vec![]).with_plan("pro"),
+            usage("second", vec![]),
+            usage("first", vec![]),
+        ];
+        sort_results(&mut results);
+        assert_eq!(
+            ids(&results),
+            ["claude", "grok", "codex", "second", "first"]
+        );
+    }
+
+    #[test]
+    fn plan_tiers_never_override_exhaustion_or_recovery_order() {
+        let mut results = vec![
+            usage(
+                "claude",
+                vec![UsageWindow::new("Weekly", 100.0).reset("3d 0h")],
+            )
+            .with_plan("max"),
+            usage(
+                "grok",
+                vec![UsageWindow::new("Weekly", 100.0).reset("Unknown")],
+            )
+            .with_plan("SuperGrok Heavy"),
+            usage(
+                "codex",
+                vec![UsageWindow::new("Weekly", 100.0).reset("1h 0m")],
+            )
+            .with_plan("prolite"),
+            usage("copilot", vec![UsageWindow::new("Chat", 10.0)]).with_plan("free"),
+        ];
+        sort_results(&mut results);
+        assert_eq!(ids(&results), ["copilot", "codex", "claude", "grok"]);
+
+        let mut results = vec![
+            usage(
+                "grok",
+                vec![UsageWindow::new("Weekly", 100.0).reset("1h 0m")],
+            )
+            .with_plan("SuperGrok Heavy"),
+            usage(
+                "claude",
+                vec![UsageWindow::new("Weekly", 100.0).reset("1h 0m")],
+            )
+            .with_plan("pro"),
+        ];
+        sort_results(&mut results);
+        assert_eq!(ids(&results), ["claude", "grok"]);
+    }
+
+    #[test]
+    fn unknown_plans_keep_the_existing_order() {
+        let mut results = vec![
+            usage("codex", vec![]).with_plan("experimental"),
+            usage("opencode", vec![]),
+            usage("claude", vec![]).with_plan("maximum"),
+            usage("grok", vec![]).with_plan("improved"),
+        ];
+        sort_results(&mut results);
+        assert_eq!(ids(&results), ["claude", "grok", "codex", "opencode"]);
     }
 
     #[test]
