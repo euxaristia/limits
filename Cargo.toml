@@ -2,7 +2,7 @@
 name = "limits"
 version = "2.0.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.94"
 description = "Every AI coding limit and quota, as a library, a CLI, and a live TUI"
 repository = "https://github.com/euxaristia/limits"
 readme = "README.md"

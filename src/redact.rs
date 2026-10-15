@@ -7,17 +7,29 @@
 //! knowing *which* account is signed in is the point of showing it at all.
 
 /// Replace the local part of every email in `input` with `f***l`.
+// PERF: Optimized email redaction by adding a fast path for inputs without `@`,
+// avoiding String allocations when no emails exist, scanning bytes directly
+// instead of decoding UTF-8 char indices, and formatting masked local parts
+// directly into the output buffer without intermediate String allocations.
 pub fn redact_emails(input: &str) -> String {
     if input.trim().is_empty() {
         return String::new();
     }
 
     let bytes = input.as_bytes();
-    let mut out = String::with_capacity(input.len());
+
+    // Fast path: if there is no `@` byte, no email can be present.
+    // In UTF-8, ASCII '@' (0x40) cannot appear as a byte in multi-byte character sequences.
+    if !bytes.contains(&b'@') {
+        return input.to_string();
+    }
+
+    let mut out: Option<String> = None;
     let mut copied = 0usize;
 
-    for (at, _) in input.char_indices().filter(|(_, c)| *c == '@') {
-        if at < copied {
+    // Scan for '@' byte positions directly rather than decoding UTF-8 chars.
+    for at in 0..bytes.len() {
+        if bytes[at] != b'@' || at < copied {
             continue;
         }
         let Some(local) = local_part(bytes, at) else {
@@ -27,23 +39,37 @@ pub fn redact_emails(input: &str) -> String {
             continue;
         };
 
-        out.push_str(&input[copied..local]);
-        out.push_str(&mask(&input[local..at]));
-        out.push_str(&input[at..domain_end]);
+        // Lazily allocate output buffer on the first matched email.
+        let buf = out.get_or_insert_with(|| String::with_capacity(input.len()));
+        buf.push_str(&input[copied..local]);
+        push_masked_local(buf, &input[local..at]);
+        buf.push_str(&input[at..domain_end]);
         copied = domain_end;
     }
 
-    out.push_str(&input[copied..]);
-    out
+    match out {
+        Some(mut buf) => {
+            buf.push_str(&input[copied..]);
+            buf
+        }
+        None => input.to_string(),
+    }
 }
 
-fn mask(local: &str) -> String {
-    let mut chars = local.chars();
-    let first = chars.next().unwrap_or('*');
-    match local.chars().count() {
-        0 => String::new(),
-        1 | 2 => format!("{first}***"),
-        _ => format!("{first}***{}", local.chars().next_back().unwrap_or('*')),
+/// Append the masked local part directly to `out` without allocating intermediate strings.
+/// Since `local_part` guarantees `local` consists solely of ASCII bytes, `local.len()` is
+/// its character count.
+fn push_masked_local(out: &mut String, local: &str) {
+    let bytes = local.as_bytes();
+    if bytes.is_empty() {
+        return;
+    }
+    let first = bytes[0] as char;
+    out.push(first);
+    out.push_str("***");
+    if bytes.len() >= 3 {
+        let last = bytes[bytes.len() - 1] as char;
+        out.push(last);
     }
 }
 
