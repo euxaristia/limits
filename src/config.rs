@@ -78,13 +78,31 @@ pub fn save(config: &LimitsConfig) -> io::Result<()> {
 }
 
 /// Write a config to an explicit path.
+///
+/// Restricts permissions on Unix to owner-only (`0o600`) because the file
+/// stores API keys and session credentials in plain text.
 pub fn save_to(path: &Path, config: &LimitsConfig) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let data = serde_json::to_string_pretty(config)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, data)
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    use std::io::Write;
+    file.write_all(data.as_bytes())
 }
 
 #[cfg(test)]
@@ -132,5 +150,19 @@ mod tests {
         let reloaded: LimitsConfig =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(reloaded.get("grok").unwrap().api_key, "xai-test");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn config_file_has_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+
+        let config = LimitsConfig::default();
+        save_to(&path, &config).unwrap();
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
     }
 }
