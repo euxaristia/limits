@@ -27,19 +27,40 @@ pub fn now_unix() -> i64 {
 /// all (read as UTC, which is what the previous implementation did for the
 /// naive form some providers emit). Fractional seconds are accepted and
 /// truncated: nothing here is measured finer than a second.
+// PERF: Fast zero-allocation parsing for 2-digit and 4-digit ASCII integers.
+#[inline(always)]
+fn parse_digits2(b: &[u8]) -> Option<i64> {
+    if b[0].is_ascii_digit() && b[1].is_ascii_digit() {
+        Some(((b[0] - b'0') * 10 + (b[1] - b'0')) as i64)
+    } else {
+        None
+    }
+}
+
+#[inline(always)]
+fn parse_digits4(b: &[u8]) -> Option<i64> {
+    if b[0].is_ascii_digit()
+        && b[1].is_ascii_digit()
+        && b[2].is_ascii_digit()
+        && b[3].is_ascii_digit()
+    {
+        Some(
+            ((b[0] - b'0') as i64) * 1000
+                + ((b[1] - b'0') as i64) * 100
+                + ((b[2] - b'0') as i64) * 10
+                + ((b[3] - b'0') as i64),
+        )
+    } else {
+        None
+    }
+}
+
 pub fn parse_rfc3339(input: &str) -> Option<i64> {
     let s = input.trim();
     let bytes = s.as_bytes();
     if bytes.len() < 19 {
         return None;
     }
-
-    let year: i64 = s.get(0..4)?.parse().ok()?;
-    let month: i64 = s.get(5..7)?.parse().ok()?;
-    let day: i64 = s.get(8..10)?.parse().ok()?;
-    let hour: i64 = s.get(11..13)?.parse().ok()?;
-    let minute: i64 = s.get(14..16)?.parse().ok()?;
-    let second: i64 = s.get(17..19)?.parse().ok()?;
 
     if bytes[4] != b'-'
         || bytes[7] != b'-'
@@ -49,6 +70,14 @@ pub fn parse_rfc3339(input: &str) -> Option<i64> {
     {
         return None;
     }
+
+    let year = parse_digits4(&bytes[0..4])?;
+    let month = parse_digits2(&bytes[5..7])?;
+    let day = parse_digits2(&bytes[8..10])?;
+    let hour = parse_digits2(&bytes[11..13])?;
+    let minute = parse_digits2(&bytes[14..16])?;
+    let second = parse_digits2(&bytes[17..19])?;
+
     if !(1..=12).contains(&month)
         || !(1..=31).contains(&day)
         || hour > 23
@@ -59,9 +88,9 @@ pub fn parse_rfc3339(input: &str) -> Option<i64> {
         return None;
     }
 
-    let mut rest = &s[19..];
-    if let Some(fraction) = rest.strip_prefix('.') {
-        let digits = fraction.bytes().take_while(u8::is_ascii_digit).count();
+    let mut rest = &bytes[19..];
+    if let Some(fraction) = rest.strip_prefix(b".") {
+        let digits = fraction.iter().take_while(|b| b.is_ascii_digit()).count();
         rest = &fraction[digits..];
     }
 
@@ -72,21 +101,23 @@ pub fn parse_rfc3339(input: &str) -> Option<i64> {
 
 /// Seconds to add to a local time to reach UTC, i.e. the negation of the zone
 /// offset. `None` means the suffix is not a zone at all.
-fn parse_offset(rest: &str) -> Option<i64> {
-    if rest.is_empty() || rest.eq_ignore_ascii_case("z") {
+// PERF: Zero-allocation offset parsing directly on byte slices instead of string filtering.
+fn parse_offset(rest: &[u8]) -> Option<i64> {
+    if rest.is_empty() || rest.eq_ignore_ascii_case(b"z") {
         return Some(0);
     }
-    let (sign, body) = match rest.as_bytes()[0] {
-        b'+' => (1, &rest[1..]),
-        b'-' => (-1, &rest[1..]),
+    let (sign, body) = match rest.first() {
+        Some(b'+') => (1, &rest[1..]),
+        Some(b'-') => (-1, &rest[1..]),
         _ => return None,
     };
-    let digits: String = body.chars().filter(|c| *c != ':').collect();
-    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let hours: i64 = digits[0..2].parse().ok()?;
-    let minutes: i64 = digits[2..4].parse().ok()?;
+
+    let (hours, minutes) = match body {
+        [h0, h1, b':', m0, m1] => (parse_digits2(&[*h0, *h1])?, parse_digits2(&[*m0, *m1])?),
+        [h0, h1, m0, m1] => (parse_digits2(&[*h0, *h1])?, parse_digits2(&[*m0, *m1])?),
+        _ => return None,
+    };
+
     if hours > 23 || minutes > 59 {
         return None;
     }
