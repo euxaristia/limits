@@ -32,7 +32,7 @@ pub fn redact_emails(input: &str) -> String {
         if bytes[at] != b'@' || at < copied {
             continue;
         }
-        let Some(local) = local_part(bytes, at) else {
+        let Some(local) = local_part(bytes, at, copied) else {
             continue;
         };
         let Some(domain_end) = domain_part(bytes, at + 1) else {
@@ -73,12 +73,12 @@ fn push_masked_local(out: &mut String, local: &str) {
     }
 }
 
-/// Walk back from `@` over the local part, returning where it starts. Mirrors
-/// the `[a-zA-Z0-9._%+-]+` half of the address grammar, anchored on a word
+/// Walk back from `@` over the local part, returning where it starts (bounded by `min_start`).
+/// Mirrors the `[a-zA-Z0-9._%+-]+` half of the address grammar, anchored on a word
 /// boundary so `foo.bar@x.com` keeps its dots but `(user@x.com` drops the paren.
-fn local_part(bytes: &[u8], at: usize) -> Option<usize> {
+fn local_part(bytes: &[u8], at: usize, min_start: usize) -> Option<usize> {
     let mut start = at;
-    while start > 0 && is_local_byte(bytes[start - 1]) {
+    while start > min_start && is_local_byte(bytes[start - 1]) {
         start -= 1;
     }
     (start < at).then_some(start)
@@ -100,6 +100,9 @@ fn domain_part(bytes: &[u8], start: usize) -> Option<usize> {
     }
     let domain = &bytes[start..end];
     let last_dot = domain.iter().rposition(|b| *b == b'.')?;
+    if last_dot == 0 {
+        return None;
+    }
     let tld = &domain[last_dot + 1..];
     (tld.len() >= 2 && tld.iter().all(u8::is_ascii_alphabetic)).then_some(end)
 }
@@ -161,5 +164,14 @@ mod tests {
             redact_emails("plan · someone@example.com · ok"),
             "plan · s***e@example.com · ok"
         );
+    }
+
+    #[test]
+    fn handles_concatenated_or_adjacent_emails_without_panicking() {
+        assert_eq!(
+            redact_emails("user1@example.comuser2@example.com"),
+            "user1@e***2@example.com"
+        );
+        assert_eq!(redact_emails("a@a.comb@b.com"), "a***@a.comb@b.com");
     }
 }
