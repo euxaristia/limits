@@ -421,6 +421,67 @@ fn opencode_key_candidates(read: impl Fn(&str, Option<&str>) -> Option<Vec<u8>>)
         .collect()
 }
 
+const OPENROUTER_KEYRING_ENTRIES: [(&str, &str); 3] = [
+    ("cairn-code", "openrouter"),
+    ("cairn-code", "openrouter-api-key"),
+    ("openrouter", "api-key"),
+];
+
+/// The OpenRouter API key stored in the OS keyring.
+pub fn load_openrouter_key() -> Option<String> {
+    openrouter_key_candidates(keyring::read).into_iter().next()
+}
+
+pub(crate) fn openrouter_key_candidates(
+    read: impl Fn(&str, Option<&str>) -> Option<Vec<u8>>,
+) -> Vec<String> {
+    OPENROUTER_KEYRING_ENTRIES
+        .iter()
+        .filter_map(|(service, account)| key_from_secret(&read(service, Some(account))?))
+        .collect()
+}
+
+const OPENAI_KEYRING_ENTRIES: [(&str, &str); 3] = [
+    ("cairn-code", "openai"),
+    ("cairn-code", "openai-api-key"),
+    ("openai", "api-key"),
+];
+
+/// The OpenAI API key stored in the OS keyring.
+pub fn load_openai_key() -> Option<String> {
+    openai_key_candidates(keyring::read).into_iter().next()
+}
+
+pub(crate) fn openai_key_candidates(
+    read: impl Fn(&str, Option<&str>) -> Option<Vec<u8>>,
+) -> Vec<String> {
+    OPENAI_KEYRING_ENTRIES
+        .iter()
+        .filter_map(|(service, account)| key_from_secret(&read(service, Some(account))?))
+        .collect()
+}
+
+const DEEPSEEK_KEYRING_ENTRIES: [(&str, &str); 3] = [
+    ("cairn-code", "deepseek"),
+    ("cairn-code", "deepseek-api-key"),
+    ("deepseek", "api-key"),
+];
+
+/// The DeepSeek API key stored in the OS keyring.
+pub fn load_deepseek_key() -> Option<String> {
+    deepseek_key_candidates(keyring::read).into_iter().next()
+}
+
+pub(crate) fn deepseek_key_candidates(
+    read: impl Fn(&str, Option<&str>) -> Option<Vec<u8>>,
+) -> Vec<String> {
+    DEEPSEEK_KEYRING_ENTRIES
+        .iter()
+        .filter_map(|(service, account)| key_from_secret(&read(service, Some(account))?))
+        .collect()
+}
+
+
 /// A keyring payload, which is either the bare key or the JSON blob a store
 /// that keeps more than the key writes.
 ///
@@ -1028,6 +1089,31 @@ mod tests {
         });
 
         assert_eq!(candidates.first().map(String::as_str), Some("sk-valid"));
+    }
+
+    #[test]
+    fn openrouter_key_comes_from_the_cairn_code_keyring_entry() {
+        let candidates = openrouter_key_candidates(|service, account| {
+            (service == "cairn-code" && account == Some("openrouter"))
+                .then(|| b"  sk-or-live  ".to_vec())
+        });
+
+        assert_eq!(candidates.first().map(String::as_str), Some("sk-or-live"));
+    }
+
+    #[test]
+    fn openai_and_deepseek_keys_come_from_cairn_code_keyring_entries() {
+        let ai_candidates = openai_key_candidates(|service, account| {
+            (service == "cairn-code" && account == Some("openai"))
+                .then(|| b"sk-openai-live".to_vec())
+        });
+        assert_eq!(ai_candidates.first().map(String::as_str), Some("sk-openai-live"));
+
+        let ds_candidates = deepseek_key_candidates(|service, account| {
+            (service == "cairn-code" && account == Some("deepseek"))
+                .then(|| b"sk-ds-live".to_vec())
+        });
+        assert_eq!(ds_candidates.first().map(String::as_str), Some("sk-ds-live"));
     }
 
     #[test]

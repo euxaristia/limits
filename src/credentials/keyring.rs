@@ -115,7 +115,70 @@ fn read_raw(service: &str, account: Option<&str>) -> Option<Vec<u8>> {
     if let Some(account) = account {
         command.args(["username", account]);
     }
-    run(&mut command)
+    if let Some(secret) = run(&mut command).filter(|s| !s.is_empty()) {
+        return Some(secret);
+    }
+    read_raw_python(service, account)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_raw_python(service: &str, account: Option<&str>) -> Option<Vec<u8>> {
+    const SCRIPT: &str = r#"
+import sys
+
+def get_secret(service, account):
+    try:
+        import dbus
+        bus = dbus.SessionBus()
+        ss = dbus.Interface(
+            bus.get_object('org.freedesktop.secrets', '/org/freedesktop/secrets'),
+            'org.freedesktop.Secret.Service',
+        )
+        session = ss.OpenSession('plain', '')[1]
+        search = {'service': service}
+        if account:
+            search['username'] = account
+        unlocked, locked = ss.SearchItems(search)
+        items = unlocked + locked
+        if not items and account:
+            unlocked, locked = ss.SearchItems({'service': service, 'account': account})
+            items = unlocked + locked
+        if not items and account:
+            unlocked, locked = ss.SearchItems({'service': service, 'user': account})
+            items = unlocked + locked
+        if items:
+            item = bus.get_object('org.freedesktop.secrets', items[0])
+            secret = item.GetSecret(session, dbus_interface='org.freedesktop.Secret.Item')
+            return bytes(secret[2])
+    except Exception:
+        pass
+    try:
+        import secretstorage
+        bus = secretstorage.dbus_init()
+        col = secretstorage.get_default_collection(bus)
+        search = {'service': service}
+        if account:
+            search['username'] = account
+        items = list(col.search_items(search))
+        if not items and account:
+            items = list(col.search_items({'service': service, 'account': account}))
+        if not items and account:
+            items = list(col.search_items({'service': service, 'user': account}))
+        if items:
+            return items[0].get_secret()
+    except Exception:
+        pass
+    return None
+
+sec = get_secret(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] != '' else None)
+if sec:
+    sys.stdout.buffer.write(sec)
+    sys.exit(0)
+sys.exit(1)
+"#;
+    let mut command = Command::new("python3");
+    command.args(["-c", SCRIPT, service, account.unwrap_or("")]);
+    run(&mut command).filter(|s| !s.is_empty())
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
@@ -129,3 +192,4 @@ fn run(command: &mut Command) -> Option<Vec<u8>> {
     let output = command.output().ok()?;
     output.status.success().then_some(output.stdout)
 }
+

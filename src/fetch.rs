@@ -38,9 +38,18 @@ impl<'a> Fetcher<'a> {
             Provider::Grok => self.grok(config),
             Provider::Copilot => self.copilot(config),
             Provider::OpenCode => self.opencode(config),
-            Provider::OpenAi if config.has_api_key() => self.openai(&config.api_key),
-            Provider::DeepSeek if config.has_api_key() => self.deepseek(&config.api_key),
-            Provider::OpenRouter if config.has_api_key() => self.openrouter(&config.api_key),
+            Provider::OpenAi => match openai_key(config) {
+                Some(key) => self.openai(&key),
+                None => ProviderUsage::unconfigured(Provider::OpenAi),
+            },
+            Provider::DeepSeek => match deepseek_key(config) {
+                Some(key) => self.deepseek(&key),
+                None => ProviderUsage::unconfigured(Provider::DeepSeek),
+            },
+            Provider::OpenRouter => match openrouter_key(config) {
+                Some(key) => self.openrouter(&key),
+                None => ProviderUsage::unconfigured(Provider::OpenRouter),
+            },
             _ => ProviderUsage::unconfigured(provider),
         }
     }
@@ -755,6 +764,39 @@ fn opencode_key(config: &ProviderConfig) -> Option<String> {
         .or_else(credentials::load_opencode_key)
 }
 
+fn openrouter_key(config: &ProviderConfig) -> Option<String> {
+    if config.has_api_key() {
+        return Some(config.api_key.trim().to_string());
+    }
+    std::env::var("OPENROUTER_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(credentials::load_openrouter_key)
+}
+
+fn openai_key(config: &ProviderConfig) -> Option<String> {
+    if config.has_api_key() {
+        return Some(config.api_key.trim().to_string());
+    }
+    std::env::var("OPENAI_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(credentials::load_openai_key)
+}
+
+fn deepseek_key(config: &ProviderConfig) -> Option<String> {
+    if config.has_api_key() {
+        return Some(config.api_key.trim().to_string());
+    }
+    std::env::var("DEEPSEEK_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(credentials::load_deepseek_key)
+}
+
 /// Pull the session key out of either a bare key or a full Cookie header.
 fn session_key_from(source: &str) -> String {
     match source.split_once("sessionKey=") {
@@ -1396,9 +1438,6 @@ mod tests {
     fn a_provider_without_credentials_is_unconfigured() {
         let http = FakeHttp::new(vec![]);
         for id in [
-            "openai",
-            "deepseek",
-            "openrouter",
             "cursor",
             "groq",
             "bedrock",
@@ -1409,6 +1448,20 @@ mod tests {
                 crate::model::Status::Unconfigured,
                 "{id} should be unconfigured"
             );
+        }
+        for (id, key_fn) in [
+            ("openai", openai_key as fn(&ProviderConfig) -> Option<String>),
+            ("deepseek", deepseek_key as fn(&ProviderConfig) -> Option<String>),
+            ("openrouter", openrouter_key as fn(&ProviderConfig) -> Option<String>),
+        ] {
+            if key_fn(&config(id)).is_none() {
+                let usage = Fetcher::new(&http).fetch(&config(id));
+                assert_eq!(
+                    usage.status,
+                    crate::model::Status::Unconfigured,
+                    "{id} should be unconfigured"
+                );
+            }
         }
         assert_eq!(
             http.request_count(),
