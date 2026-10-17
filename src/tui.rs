@@ -465,8 +465,9 @@ fn draw_windows(frame: &mut Frame, area: Rect, provider: &LiveProvider) {
     }
     let now = now_unix();
     // PERF: Avoid allocating a Vec<Constraint> on every frame.
-    let rows = Layout::vertical(std::iter::repeat(Constraint::Length(1)).take(area.height as usize))
-        .split(area);
+    let rows =
+        Layout::vertical(std::iter::repeat(Constraint::Length(1)).take(area.height as usize))
+            .split(area);
 
     for (index, window) in provider.windows.iter().enumerate() {
         let label_row = index * 2;
