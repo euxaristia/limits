@@ -9,7 +9,7 @@
 use crate::credentials::{self, Token};
 use crate::http::{HttpClient, HttpRequest, HttpResponse};
 use crate::model::{Provider, ProviderConfig, ProviderUsage, SubscriptionPlan, UsageWindow};
-use crate::parsers::{antigravity, claude, codex, copilot, opencode};
+use crate::parsers::{antigravity, claude, codex, copilot, meta, opencode};
 use crate::time::{WEEK, format_countdown, now_unix};
 use serde_json::Value;
 
@@ -38,6 +38,7 @@ impl<'a> Fetcher<'a> {
             Provider::Grok => self.grok(config),
             Provider::Copilot => self.copilot(config),
             Provider::OpenCode => self.opencode(config),
+            Provider::Meta => self.meta(config),
             Provider::OpenAi => match openai_key(config) {
                 Some(key) => self.openai(&key),
                 None => ProviderUsage::unconfigured(Provider::OpenAi),
@@ -733,6 +734,131 @@ impl<'a> Fetcher<'a> {
         )
         .and_then(|body| body.get("email")?.as_str().map(str::to_string))
         .unwrap_or_default()
+    }
+
+    // ---- Meta Muse --------------------------------------------------------
+
+    fn meta(&self, config: &ProviderConfig) -> ProviderUsage {
+        let key_override = config.api_key.trim();
+        let token = credentials::load_meta();
+        if key_override.is_empty() && token.is_none() {
+            return ProviderUsage::unconfigured(Provider::Meta);
+        }
+
+        let mut oauth_token = String::new();
+        let mut model_api_key = key_override.to_string();
+        let mut email = String::new();
+        let mut tier = String::new();
+
+        if let Some(t) = &token {
+            if !t.email.is_empty() {
+                email = t.email.clone();
+            }
+            if !t.plan_type.is_empty() {
+                tier = t.plan_type.clone();
+            }
+            if !t.access_token.is_empty() {
+                oauth_token = t.access_token.clone();
+            }
+            if model_api_key.is_empty() && !t.account_id.is_empty() {
+                model_api_key = t.account_id.clone();
+            }
+        }
+
+        // If we have an OAuth access token, probe /muse-code/key for live tier, email,
+        // and minted model key.
+        if !oauth_token.is_empty() {
+            let key_req = HttpRequest::post("https://api.meta.ai/muse-code/key", "{}")
+                .bearer(&oauth_token)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json");
+            if let Some(resp) = self.probe_json(key_req)
+                && let Some(info) = meta::parse_key_metadata(&resp.to_string())
+            {
+                if email.is_empty() && !info.email.is_empty() {
+                    email = info.email;
+                }
+                if !info.tier.is_empty() {
+                    tier = info.tier;
+                }
+                if model_api_key.is_empty() && let Some(k) = info.api_key {
+                    model_api_key = k;
+                }
+            }
+        }
+
+        if model_api_key.is_empty() {
+            model_api_key = oauth_token.clone();
+        }
+        if model_api_key.is_empty() {
+            return ProviderUsage::unconfigured(Provider::Meta);
+        }
+
+        let body = serde_json::json!({
+            "model": "muse-wonder-1.0",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": " "}]}],
+            "store": false,
+            "stream": true,
+            "max_output_tokens": 16,
+        });
+
+        let request = HttpRequest::post("https://api.meta.ai/v1/responses", body.to_string())
+            .bearer(&model_api_key)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .header("x-client-id", "1");
+
+        let response = match self.send(request) {
+            Ok(resp) => resp,
+            Err(err) => return ProviderUsage::degraded(Provider::Meta, err),
+        };
+
+        let plan = SubscriptionPlan::new(Provider::Meta, &tier);
+        let plan_name = plan
+            .as_ref()
+            .map(|p| p.display_name.as_str())
+            .unwrap_or(tier.as_str());
+        let footer = account_footer("Meta Muse", &[&email, plan_name]);
+
+        if response.status == 429 {
+            if let Some(window) = meta::parse_rate_limit(&response.body, now_unix()) {
+                let mut result = ProviderUsage::healthy(Provider::Meta, vec![window], footer);
+                result.plan = plan;
+                return result;
+            }
+            return ProviderUsage::degraded(
+                Provider::Meta,
+                "Subscription quota exhausted (rate limit exceeded)",
+            );
+        }
+
+        if response.is_auth_failure() {
+            return ProviderUsage::degraded(
+                Provider::Meta,
+                "Meta API authentication failed; run 'muse login' or set MUSE_API_KEY",
+            );
+        }
+
+        if !response.is_success() {
+            return ProviderUsage::degraded(
+                Provider::Meta,
+                format!("Meta API returned HTTP {}", response.status),
+            );
+        }
+
+        let windows = meta::parse_subscription_usage(&response.body, now_unix());
+        if windows.is_empty() {
+            let window = UsageWindow::new("Quota", 0.0)
+                .reset("Active")
+                .text("quota unavailable");
+            let mut result = ProviderUsage::healthy(Provider::Meta, vec![window], footer);
+            result.plan = plan;
+            return result;
+        }
+
+        let mut result = ProviderUsage::healthy(Provider::Meta, windows, footer);
+        result.plan = plan;
+        result
     }
 }
 
@@ -1507,6 +1633,43 @@ mod tests {
         assert_eq!(short.chars().count(), 203);
         assert!(short.ends_with("..."));
         assert_eq!(truncate("short", 200), "short");
+    }
+
+    #[test]
+    fn meta_rate_limited_reports_quota_exhausted() {
+        let key_json = r#"{"subs_tier_name":"Muse Code Power Usage","user_email":"mateo@example.com","is_subs_active":true}"#;
+        let rate_limit_json = r#"{"error":{"code":"rate_limit_exceeded","message":"Subscription quota exhausted. Your usage window resets at 2026-10-19T00:00:00Z.","resets_at":1792368000,"type":"rate_limit_error"}}"#;
+        let http = FakeHttp::new(vec![
+            ("muse-code/key", 200, key_json),
+            ("v1/responses", 429, rate_limit_json),
+        ]);
+        let usage = Fetcher::new(&http).fetch(&keyed("meta", "LLM|test-key"));
+        assert_eq!(usage.id, "meta");
+        assert_eq!(usage.display_name, "Meta Muse");
+        assert_eq!(usage.status, crate::model::Status::Healthy);
+        assert!(usage.is_exhausted());
+        assert_eq!(usage.windows.len(), 1);
+        assert_eq!(usage.windows[0].label, "Quota");
+        assert_eq!(usage.windows[0].used_percent, 100.0);
+    }
+
+    #[test]
+    fn meta_with_usage_sse_reports_both_windows() {
+        let key_json = r#"{"subs_tier_name":"Muse Code Power Usage","user_email":"mateo@example.com","is_subs_active":true}"#;
+        let sse = "data: {\"type\":\"response.subscription_usage\",\"subscription\":{\"window\":{\"used_percent\":40.0,\"window_duration_mins\":300,\"resets_at\":1792368000},\"weekly\":{\"used_percent\":20.0,\"resets_at\":1792972800}}}\n\n";
+        let http = FakeHttp::new(vec![
+            ("muse-code/key", 200, key_json),
+            ("v1/responses", 200, sse),
+        ]);
+        let usage = Fetcher::new(&http).fetch(&keyed("meta", "LLM|test-key"));
+        assert_eq!(usage.id, "meta");
+        assert_eq!(usage.status, crate::model::Status::Healthy);
+        assert!(!usage.is_exhausted());
+        assert_eq!(usage.windows.len(), 2);
+        assert_eq!(usage.windows[0].label, "Session (5h)");
+        assert_eq!(usage.windows[0].used_percent, 40.0);
+        assert_eq!(usage.windows[1].label, "Weekly");
+        assert_eq!(usage.windows[1].used_percent, 20.0);
     }
 
     #[test]

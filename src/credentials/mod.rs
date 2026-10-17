@@ -571,6 +571,119 @@ pub(crate) fn parse_antigravity(root: &Value) -> Option<Token> {
     })
 }
 
+/// Meta Muse credentials, checking the CLI's auth.json, OS keyring entries,
+/// and environment variables.
+pub fn load_meta() -> Option<Token> {
+    for path in muse_auth_paths() {
+        if let Some(value) = read_json(&path)
+            && let Some(token) = parse_muse_auth(&value)
+        {
+            return Some(token);
+        }
+    }
+
+    for (service, account) in [
+        ("cairn-code", Some("oauth:meta")),
+        ("cairn-code", Some("meta")),
+        ("muse", None),
+    ] {
+        if let Some(data) = keyring::read(service, account)
+            && let Ok(value) = serde_json::from_slice::<Value>(&data)
+            && let Some(token) = parse_muse_auth(&value)
+        {
+            return Some(token);
+        }
+    }
+
+    for var in ["MUSE_API_KEY", "META_MODEL_API_KEY", "META_API_KEY"] {
+        if let Ok(key) = std::env::var(var).map(|k| k.trim().to_string())
+            && !key.is_empty()
+        {
+            return Some(Token {
+                access_token: key.clone(),
+                account_id: key,
+                auth_method: "api_key".into(),
+                ..Default::default()
+            });
+        }
+    }
+
+    None
+}
+
+fn muse_auth_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(dir) = std::env::var("MUSE_CONFIG_DIR").map(PathBuf::from) {
+        paths.push(dir.join("auth.json"));
+    }
+    let home = home_dir();
+    paths.push(home.join(".config").join("muse").join("auth.json"));
+    paths
+}
+
+pub(crate) fn parse_muse_auth(root: &Value) -> Option<Token> {
+    let meta_obj = root
+        .get("providers")
+        .and_then(|p| p.get("meta"))
+        .unwrap_or(root);
+
+    let access_token = string_at(meta_obj, "access_token")
+        .or_else(|| string_at(meta_obj, "accessToken"));
+
+    let api_key = string_at(meta_obj, "api_key")
+        .or_else(|| string_at(meta_obj, "apiKey"))
+        .or_else(|| string_at(meta_obj, "model_api_key"))
+        .or_else(|| string_at(meta_obj, "modelApiKey"))
+        .or_else(|| string_at(meta_obj, "meta_api_key"));
+
+    let refresh_token = string_at(meta_obj, "refresh_token")
+        .or_else(|| string_at(meta_obj, "refreshToken"))
+        .unwrap_or_default();
+
+    let email = string_at(meta_obj, "user_email")
+        .or_else(|| string_at(meta_obj, "email"))
+        .unwrap_or_default();
+
+    let plan_type = string_at(meta_obj, "subs_tier_name")
+        .or_else(|| {
+            meta_obj
+                .get("subs_active")
+                .and_then(Value::as_bool)
+                .filter(|&a| a)
+                .map(|_| "Power Usage".to_string())
+        })
+        .unwrap_or_default();
+
+    let auth_method = string_at(meta_obj, "mechanism")
+        .or_else(|| string_at(meta_obj, "obtained_via"))
+        .unwrap_or_else(|| {
+            if access_token.is_some() {
+                "oauth".into()
+            } else {
+                "api_key".into()
+            }
+        });
+
+    let expires_at = expiry_at(meta_obj, &["expires_at", "expiry"]);
+
+    if access_token.is_none() && api_key.is_none() {
+        return None;
+    }
+
+    let access = access_token.unwrap_or_else(|| api_key.clone().unwrap_or_default());
+    let account_id = api_key.unwrap_or_default();
+
+    Some(Token {
+        access_token: access,
+        account_id,
+        refresh_token,
+        email,
+        plan_type,
+        auth_method,
+        expires_at,
+    })
+}
+
 /// Load whichever credential a provider uses, if any.
 pub fn load(provider: Provider) -> Option<Token> {
     match provider {
@@ -579,6 +692,7 @@ pub fn load(provider: Provider) -> Option<Token> {
         Provider::Gemini => load_gemini(),
         Provider::Grok => load_grok(),
         Provider::Antigravity => load_antigravity(),
+        Provider::Meta => load_meta(),
         _ => None,
     }
 }
@@ -593,7 +707,8 @@ pub fn is_token_working(provider: Provider) -> bool {
         | Provider::Claude
         | Provider::Gemini
         | Provider::Grok
-        | Provider::Antigravity => load(provider).is_some_and(|t| t.is_fresh()),
+        | Provider::Antigravity
+        | Provider::Meta => load(provider).is_some_and(|t| t.is_fresh()),
         // `gh` has no expiring token to refresh; the question is only whether
         // it has been logged in at all.
         Provider::Copilot => gh_hosts_paths().iter().any(|path| path.exists()),

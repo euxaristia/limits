@@ -1,9 +1,9 @@
 //! Every AI coding limit and quota, in one place.
 //!
 //! `limits` reads how much of each AI subscription is left — Claude, Codex,
-//! Antigravity, Grok, GitHub Copilot, OpenCode Go, and the balance-style API
-//! providers — from the credentials the local CLIs have already stored. It
-//! ships as a library, a CLI, and a live full-screen dashboard.
+//! Antigravity, Grok, GitHub Copilot, OpenCode Go, Meta Muse, and the
+//! balance-style API providers — from the credentials the local CLIs have
+//! already stored. It ships as a library, a CLI, and a live full-screen dashboard.
 //!
 //! # Using it as a library
 //!

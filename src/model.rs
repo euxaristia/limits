@@ -26,13 +26,14 @@ pub enum Provider {
     Grok,
     Copilot,
     OpenCode,
+    Meta,
     Unknown,
 }
 
 impl Provider {
     /// Every provider that can appear in a config file, in the order a fresh
     /// config lists them.
-    pub const ALL: [Provider; 14] = [
+    pub const ALL: [Provider; 15] = [
         Provider::Codex,
         Provider::OpenAi,
         Provider::Claude,
@@ -47,6 +48,7 @@ impl Provider {
         Provider::Grok,
         Provider::Copilot,
         Provider::OpenCode,
+        Provider::Meta,
     ];
 
     /// The stable identifier used in config files, CLI flags, and JSON output.
@@ -66,6 +68,7 @@ impl Provider {
             Provider::Grok => "grok",
             Provider::Copilot => "copilot",
             Provider::OpenCode => "opencode",
+            Provider::Meta => "meta",
             Provider::Unknown => "unknown",
         }
     }
@@ -87,6 +90,7 @@ impl Provider {
             Provider::Grok => "Grok",
             Provider::Copilot => "GitHub Copilot",
             Provider::OpenCode => "OpenCode Go",
+            Provider::Meta => "Meta Muse",
             Provider::Unknown => "Unknown",
         }
     }
@@ -120,6 +124,9 @@ impl Provider {
             Provider::OpenCode => {
                 "OpenCode Go key required. Set OPENCODE_GO_API_KEY or run 'limits config set-key opencode <key>'"
             }
+            Provider::Meta => {
+                "Meta credentials required. Run 'muse login' or set MUSE_API_KEY"
+            }
             _ => "Credentials or API key required",
         }
     }
@@ -142,6 +149,7 @@ impl From<&str> for Provider {
             "grok" => Provider::Grok,
             "copilot" => Provider::Copilot,
             "opencode" => Provider::OpenCode,
+            "meta" | "muse" => Provider::Meta,
             _ => Provider::Unknown,
         }
     }
@@ -397,6 +405,13 @@ impl SubscriptionPlan {
             }
             (Provider::Grok, "supergrok lite" | "super grok lite") => {
                 ("SuperGrok Lite", PlanTier::Other)
+            }
+            (Provider::Meta, "muse code power usage" | "power usage" | "power") => {
+                ("Power Usage", PlanTier::Pro)
+            }
+            (Provider::Meta, "muse code pro" | "pro") => ("Pro", PlanTier::Pro),
+            (Provider::Meta, "muse code standard" | "standard") => {
+                ("Standard", PlanTier::Other)
             }
             (_, name) => match name.split_whitespace().next() {
                 Some("max") => (name, PlanTier::Max),

@@ -177,6 +177,7 @@ limits/
 | Gemini | `~/.gemini/oauth_creds.json` |
 | GitHub Copilot | `gh auth token`, or an API key |
 | OpenCode Go | An API key in config, then `OPENCODE_GO_API_KEY` / `OPENCODE_API_KEY`, the OS keyring entry cairn-code writes, and `$XDG_DATA_HOME/opencode/auth.json` (`~/.local/share/opencode/auth.json`) |
+| Meta Muse | `~/.config/muse/auth.json` (`muse login`), OS keyring (`oauth:meta`), or `MUSE_API_KEY` |
 | OpenAI, DeepSeek, OpenRouter | An API key in config, then environment variables (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`), and the OS keyring entry cairn-code writes |
 
 For OAuth-backed providers (Claude, Antigravity, Grok, Gemini, Copilot), `limits` will run the provider's own CLI headlessly to force a token refresh if the stored one has expired, before giving up.
