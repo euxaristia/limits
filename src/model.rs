@@ -124,9 +124,7 @@ impl Provider {
             Provider::OpenCode => {
                 "OpenCode Go key required. Set OPENCODE_GO_API_KEY or run 'limits config set-key opencode <key>'"
             }
-            Provider::Meta => {
-                "Meta credentials required. Run 'muse login' or set MUSE_API_KEY"
-            }
+            Provider::Meta => "Meta credentials required. Run 'muse login' or set MUSE_API_KEY",
             _ => "Credentials or API key required",
         }
     }
@@ -410,9 +408,7 @@ impl SubscriptionPlan {
                 ("Power Usage", PlanTier::Pro)
             }
             (Provider::Meta, "muse code pro" | "pro") => ("Pro", PlanTier::Pro),
-            (Provider::Meta, "muse code standard" | "standard") => {
-                ("Standard", PlanTier::Other)
-            }
+            (Provider::Meta, "muse code standard" | "standard") => ("Standard", PlanTier::Other),
             (_, name) => match name.split_whitespace().next() {
                 Some("max") => (name, PlanTier::Max),
                 Some("pro" | "pro+") => (name, PlanTier::Pro),

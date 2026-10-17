@@ -192,4 +192,3 @@ fn run(command: &mut Command) -> Option<Vec<u8>> {
     let output = command.output().ok()?;
     output.status.success().then_some(output.stdout)
 }
-
