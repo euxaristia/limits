@@ -122,8 +122,7 @@ fn read_raw(service: &str, account: Option<&str>) -> Option<Vec<u8>> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn read_raw_python(service: &str, account: Option<&str>) -> Option<Vec<u8>> {
-    const SCRIPT: &str = r#"
+const SECRET_SERVICE_SCRIPT: &str = r#"
 import sys
 
 def get_secret(service, account):
@@ -176,8 +175,32 @@ if sec:
     sys.exit(0)
 sys.exit(1)
 "#;
+
+/// Build the fallback interpreter invocation. `-I` (isolated mode) must come
+/// before `-c`: without it, Python seeds `sys.path` from the working
+/// directory and honours `PYTHONPATH` and the user site-packages, so a
+/// `dbus.py` or `secretstorage.py` planted wherever the user happens to run
+/// `limits` would shadow the real modules inside a process that is about to
+/// read keyring secrets. Isolated mode drops all of those entries, leaving
+/// only the standard library and site-packages. `run` still routes the child
+/// through `headless::prepare`, which moves it into the temp directory, but
+/// the shared temp directory is itself plantable, so it is not a substitute.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn python_fallback_command(service: &str, account: Option<&str>) -> Command {
     let mut command = Command::new("python3");
-    command.args(["-c", SCRIPT, service, account.unwrap_or("")]);
+    command.args([
+        "-I",
+        "-c",
+        SECRET_SERVICE_SCRIPT,
+        service,
+        account.unwrap_or(""),
+    ]);
+    command
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_raw_python(service: &str, account: Option<&str>) -> Option<Vec<u8>> {
+    let mut command = python_fallback_command(service, account);
     run(&mut command).filter(|s| !s.is_empty())
 }
 
@@ -193,3 +216,44 @@ fn run(command: &mut Command) -> Option<Vec<u8>> {
     output.status.success().then_some(output.stdout)
 }
 
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod tests {
+    use super::*;
+
+    fn fallback_args(service: &str, account: Option<&str>) -> Vec<String> {
+        let command = python_fallback_command(service, account);
+        assert_eq!(command.get_program(), "python3");
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The fallback interpreter handles keyring secrets, so it must run in
+    /// isolated mode: `-I` first, then `-c`, so no module planted in the
+    /// working directory (or on `PYTHONPATH`, or in the user site-packages)
+    /// can shadow the `dbus` and `secretstorage` imports in the script.
+    #[test]
+    fn python_fallback_runs_the_interpreter_isolated() {
+        let args = fallback_args("some-service", Some("some-account"));
+        assert_eq!(
+            args,
+            vec![
+                "-I",
+                "-c",
+                SECRET_SERVICE_SCRIPT,
+                "some-service",
+                "some-account",
+            ]
+        );
+    }
+
+    /// A missing account still passes the empty positional argument the
+    /// script keys its `sys.argv` checks on.
+    #[test]
+    fn python_fallback_passes_an_empty_account_argument() {
+        let args = fallback_args("some-service", None);
+        assert_eq!(args.len(), 5);
+        assert_eq!(args[4], "");
+    }
+}
