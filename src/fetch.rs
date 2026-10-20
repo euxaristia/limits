@@ -361,17 +361,30 @@ impl<'a> Fetcher<'a> {
         }
 
         // Balances arrive as decimal strings so they do not lose cents to a
-        // float in transit.
-        let balance: f64 = body
+        // float in transit. One entry is reported per currency, so they are
+        // listed rather than summed.
+        let balances: Vec<(String, f64)> = body
             .get("balance_infos")
             .and_then(Value::as_array)
             .map(|infos| {
                 infos
                     .iter()
-                    .filter_map(|info| info.get("balance")?.as_str()?.parse::<f64>().ok())
-                    .sum()
+                    .filter_map(|info| {
+                        let currency = info.get("currency")?.as_str()?;
+                        let total = info.get("total_balance")?.as_str()?.parse::<f64>().ok()?;
+                        Some((currency.to_string(), total))
+                    })
+                    .collect()
             })
-            .unwrap_or(0.0);
+            .unwrap_or_default();
+        if balances.is_empty() {
+            return ProviderUsage::degraded(Provider::DeepSeek, "DeepSeek reported no balance");
+        }
+        let available = balances
+            .iter()
+            .map(|(currency, total)| money(*total, currency))
+            .collect::<Vec<_>>()
+            .join(", ");
 
         // A prepaid balance has no denominator, so there is no percentage to
         // show; the footer carries the number that matters.
@@ -382,7 +395,7 @@ impl<'a> Fetcher<'a> {
                     .reset("Never Resets")
                     .text("Balance only"),
             ],
-            format!("Available: ${balance:.2}"),
+            format!("Available: {available}"),
         )
     }
 
@@ -1050,6 +1063,15 @@ fn number_at(value: &Value, key: &str) -> f64 {
     value.get(key).and_then(Value::as_f64).unwrap_or(0.0)
 }
 
+/// An amount with its currency, using a symbol where one is unambiguous.
+fn money(amount: f64, currency: &str) -> String {
+    match currency {
+        "USD" => format!("${amount:.2}"),
+        "CNY" => format!("¥{amount:.2}"),
+        code => format!("{amount:.2} {code}"),
+    }
+}
+
 fn first_non_empty(candidates: &[&str]) -> String {
     candidates
         .iter()
@@ -1512,17 +1534,35 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_sums_every_balance_it_reports() {
+    fn deepseek_reports_the_total_balance_for_each_currency() {
         let http = FakeHttp::new(vec![(
             "deepseek.com",
             200,
-            r#"{"is_available":true,"balance_infos":[{"balance":"10.50"},{"balance":"4.50"}]}"#,
+            r#"{"is_available":true,"balance_infos":[
+                {"currency":"USD","total_balance":"19.00","granted_balance":"0.00","topped_up_balance":"19.00"},
+                {"currency":"CNY","total_balance":"10.50","granted_balance":"0.00","topped_up_balance":"10.50"}
+            ]}"#,
         )]);
         let usage = Fetcher::new(&http).fetch(&keyed("deepseek", "sk-ds"));
 
-        assert_eq!(usage.footer, "Available: $15.00");
+        assert_eq!(usage.footer, "Available: $19.00, ¥10.50");
         assert_eq!(usage.remaining_percent(), None);
         assert_eq!(usage.windows[0].remaining_text(), "Balance only");
+    }
+
+    #[test]
+    fn deepseek_without_a_balance_is_not_a_healthy_zero() {
+        for body in [
+            r#"{"is_available":true}"#,
+            r#"{"is_available":true,"balance_infos":[]}"#,
+            r#"{"is_available":true,"balance_infos":[{"currency":"USD","balance":"19.00"}]}"#,
+        ] {
+            let http = FakeHttp::new(vec![("deepseek.com", 200, body)]);
+            let usage = Fetcher::new(&http).fetch(&keyed("deepseek", "sk-ds"));
+
+            assert_eq!(usage.status, crate::model::Status::Degraded, "{body}");
+            assert_eq!(usage.error_message, "DeepSeek reported no balance");
+        }
     }
 
     #[test]
