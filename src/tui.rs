@@ -479,10 +479,11 @@ fn draw_windows(frame: &mut Frame, area: Rect, provider: &LiveProvider) {
         }
 
         let countdown = window.countdown(now);
-        let reset = if countdown.is_empty() {
-            String::new()
+        // PERF: Avoid multi-stage string allocations ("resets {countdown}" then "   {reset}") per window on every frame.
+        let reset_span = if countdown.is_empty() {
+            Span::raw("")
         } else {
-            format!("resets {countdown}")
+            Span::styled(format!("   resets {countdown}"), dim())
         };
         let remaining = window.window.remaining_percent();
         frame.render_widget(
@@ -498,7 +499,7 @@ fn draw_windows(frame: &mut Frame, area: Rect, provider: &LiveProvider) {
                         .map(|_| severity(window.window.used_percent))
                         .unwrap_or(Color::DarkGray)),
                 ),
-                Span::styled(format!("   {reset}"), dim()),
+                reset_span,
             ])),
             rows[label_row],
         );
@@ -532,11 +533,14 @@ fn draw_trend(frame: &mut Frame, area: Rect, app: &App, id: &str) {
     let line = if points.len() < 2 {
         Line::styled("trend (% left)  (collecting…)", dim())
     } else {
-        let remaining: Vec<f64> = points.iter().map(|used| 100.0 - used).collect();
+        // PERF: Transform `used_percent` to remaining percentage on the fly via `sparkline_mapped`
+        // instead of allocating an intermediate `Vec<f64>` on every frame render.
         Line::from(vec![
             Span::styled("trend (% left)  ", dim()),
             Span::styled(
-                sparkline(&remaining, area.width.saturating_sub(16) as usize),
+                sparkline_mapped(points, area.width.saturating_sub(16) as usize, |used| {
+                    100.0 - used
+                }),
                 Style::new().fg(severity(*points.last().unwrap_or(&0.0))),
             ),
         ])
@@ -548,7 +552,14 @@ fn draw_trend(frame: &mut Frame, area: Rect, app: &App, id: &str) {
 ///
 /// The scale is fixed at 0-100 rather than fitted to the data: an
 /// auto-scaled spark makes a drift from 40% to 41% look like a cliff.
+#[cfg(test)]
 fn sparkline(points: &[f64], width: usize) -> String {
+    sparkline_mapped(points, width, |p| p)
+}
+
+/// Render values mapped via `map_fn` as block characters without heap-allocating
+/// an intermediate mapped vector.
+fn sparkline_mapped(points: &[f64], width: usize, map_fn: impl Fn(f64) -> f64) -> String {
     const BLOCKS: [char; 8] = [
         '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
         '\u{2588}',
@@ -561,7 +572,8 @@ fn sparkline(points: &[f64], width: usize) -> String {
     let start = points.len().saturating_sub(width);
     let slice = &points[start..];
     let mut out = String::with_capacity(slice.len());
-    for &percent in slice {
+    for &point in slice {
+        let percent = map_fn(point);
         let index = ((percent.clamp(0.0, 100.0) / 100.0) * (BLOCKS.len() - 1) as f64).round();
         out.push(BLOCKS[index as usize]);
     }
