@@ -8,6 +8,11 @@
 **Learning:** Parsing routines scanning backwards from delimiters (`@`) must be bounded by the current write cursor (`copied`) to avoid overlap and slice index panics.
 **Prevention:** Always pass the buffer progress offset (`min_start`) to backward scanning helper functions.
 
+## 2026-03-31 - Unescaped header names in curl config file format
+**Vulnerability:** `CurlConfig::write` escaped header values but left header names unescaped, allowing double quotes or backslashes in header names to escape string literals in the generated `curl` `--config` file.
+**Learning:** When generating config file formats with string literals (like `curl --config`), both key and value components must be escaped identically.
+**Prevention:** Always apply backslash and quote escaping (`replace('\\', "\\\\").replace('"', "\\\"")`) to both key and value fields when building `curl` config header entries.
+
 ## 2026-04-01 - Parent directory of credential-bearing configuration files left with default umask permissions
 **Vulnerability:** `save_to` set owner-only permissions (`0o600`) on `config.json`, but `std::fs::create_dir_all` created missing parent directories using default umask (`0o755`), leaving the directory world-readable and searchable by local users.
 **Learning:** Restricting file permissions alone is insufficient if the parent directory permissions allow local users to traverse or inspect metadata.
