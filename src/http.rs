@@ -346,8 +346,9 @@ impl CurlConfig {
         for (name, value) in headers {
             check_header_name(name)?;
             check_control_chars("header value", value)?;
-            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-            content.push_str(&format!("header = \"{name}: {escaped}\"\n"));
+            let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
+            let escaped_value = value.replace('\\', "\\\\").replace('"', "\\\"");
+            content.push_str(&format!("header = \"{escaped_name}: {escaped_value}\"\n"));
         }
         // Keeps the response to a single header block for POSTs with a body.
         content.push_str("header = \"Expect:\"\n");
@@ -475,11 +476,11 @@ mod tests {
     }
 
     #[test]
-    fn header_values_are_quoted_safely_for_the_config_format() {
-        let config = CurlConfig::write(&[("Cookie".into(), r#"a"b\c"#.into())]).unwrap();
+    fn header_names_and_values_are_quoted_safely_for_the_config_format() {
+        let config = CurlConfig::write(&[("X-Custom".into(), r#"a"b\c"#.into())]).unwrap();
         let content = std::fs::read_to_string(config.path()).unwrap();
         assert!(
-            content.contains(r#"header = "Cookie: a\"b\\c""#),
+            content.contains(r#"header = "X-Custom: a\"b\\c""#),
             "{content}"
         );
     }
