@@ -413,13 +413,25 @@ impl SubscriptionPlan {
             (Provider::Meta, "muse code standard" | "standard") => {
                 ("Standard", PlanTier::Other)
             }
+            (Provider::Antigravity, "google ai ultra" | "g1 ultra tier" | "g1-ultra-tier") => {
+                ("Google AI Ultra", PlanTier::Max)
+            }
+            (Provider::Antigravity, "google ai pro" | "g1 pro tier" | "g1-pro-tier") => {
+                ("Google AI Pro", PlanTier::Pro)
+            }
+            (Provider::Antigravity, "antigravity" | "free tier" | "free-tier") => {
+                ("Free", PlanTier::Other)
+            }
             (_, name) => match name.split_whitespace().next() {
                 Some("max") => (name, PlanTier::Max),
                 Some("pro" | "pro+") => (name, PlanTier::Pro),
                 _ => (id, PlanTier::Other),
             },
         };
-        let display_name = if name.starts_with("SuperGrok") || tier == PlanTier::Other {
+        let display_name = if name.starts_with("SuperGrok")
+            || name.starts_with("Google AI")
+            || tier == PlanTier::Other
+        {
             name.to_string()
         } else {
             let title = name
@@ -664,6 +676,25 @@ mod tests {
                 "SuperGrok Heavy",
                 PlanTier::Max,
             ),
+            (
+                Provider::Antigravity,
+                "g1-pro-tier",
+                "Google AI Pro",
+                PlanTier::Pro,
+            ),
+            (
+                Provider::Antigravity,
+                "Google AI Pro",
+                "Google AI Pro",
+                PlanTier::Pro,
+            ),
+            (
+                Provider::Antigravity,
+                "g1-ultra-tier",
+                "Google AI Ultra",
+                PlanTier::Max,
+            ),
+            (Provider::Antigravity, "free-tier", "Free", PlanTier::Other),
         ] {
             let plan = SubscriptionPlan::new(provider, id).unwrap();
             assert_eq!(plan.id, id.trim());

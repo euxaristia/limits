@@ -462,47 +462,83 @@ impl<'a> Fetcher<'a> {
                 .header("User-Agent", "antigravity")
         };
 
-        // The summary endpoint is the current one; the older per-model endpoint
-        // is the fallback for builds that do not serve it yet.
-        let mut response = self.http.send(&quota(
-            "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
-        ));
-        if !matches!(&response, Ok(r) if r.is_success()) {
-            response = self.http.send(&quota(
+        // The local language server returns the complete summary (every
+        // group, Argon included) that the direct API summary withholds.
+        // It is reachable only when agy exposes its address and CSRF token
+        // to this process; otherwise the direct calls below are the source.
+        let ls_buckets = self.language_server_buckets();
+
+        let summary_resp;
+        let flat_resp;
+        let (summary_body, flat_body) = if ls_buckets.is_empty() {
+            summary_resp = self.http.send(&quota(
+                "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+            ));
+            flat_resp = self.http.send(&quota(
                 "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota",
             ));
-        }
-
-        let response = match response {
-            Ok(response) => response,
-            Err(e) => return ProviderUsage::degraded(Provider::Antigravity, e.to_string()),
+            match (&summary_resp, &flat_resp) {
+                (Ok(s), Ok(f)) if s.is_success() && f.is_success() => {
+                    (Some(s.body.as_str()), Some(f.body.as_str()))
+                }
+                (Ok(s), _) if s.is_success() => (Some(s.body.as_str()), None),
+                (_, Ok(f)) if f.is_success() => (None, Some(f.body.as_str())),
+                (Err(e), _) => {
+                    return ProviderUsage::degraded(Provider::Antigravity, e.to_string());
+                }
+                (Ok(s), _) => {
+                    return ProviderUsage::degraded(
+                        Provider::Antigravity,
+                        truncate(
+                            &format!("Antigravity API returned status {}: {}", s.status, s.body),
+                            200,
+                        ),
+                    );
+                }
+            }
+        } else {
+            (None, None)
         };
-        if !response.is_success() {
-            return ProviderUsage::degraded(
-                Provider::Antigravity,
-                truncate(
-                    &format!(
-                        "Antigravity API returned status {}: {}",
-                        response.status, response.body
-                    ),
-                    200,
-                ),
-            );
-        }
+
+        let load_assist = self.probe_json(quota(
+            "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+        ));
+        let plan_id = load_assist
+            .as_ref()
+            .and_then(|body| {
+                body.get("paidTier")
+                    .and_then(|p| p.get("name").or_else(|| p.get("id")))
+                    .or_else(|| {
+                        body.get("currentTier")
+                            .and_then(|c| c.get("name").or_else(|| c.get("id")))
+                    })
+            })
+            .and_then(Value::as_str);
 
         let mut email = token.email.clone();
         if email.is_empty() {
             email = self.google_email(&token.access_token);
         }
-        let account = if email.is_empty() {
-            token.auth_method.clone()
-        } else {
-            format!("{email}, {}", token.auth_method)
+        let plan_label = plan_id
+            .and_then(|id| SubscriptionPlan::new(Provider::Antigravity, id))
+            .map(|p| p.display_name);
+        let account = match (email.is_empty(), plan_label.as_deref()) {
+            (false, Some(plan)) => format!("{email} ({plan})"),
+            (false, None) if !token.auth_method.is_empty() => {
+                format!("{email}, {}", token.auth_method)
+            }
+            (false, None) => email,
+            (true, Some(plan)) => plan.to_string(),
+            (true, None) => token.auth_method.clone(),
         };
 
-        let buckets = antigravity::parse(&response.body);
+        let buckets = if ls_buckets.is_empty() {
+            antigravity::parse_combined(summary_body, flat_body)
+        } else {
+            ls_buckets
+        };
         if buckets.is_empty() {
-            return ProviderUsage::healthy(
+            let mut usage = ProviderUsage::healthy(
                 Provider::Antigravity,
                 vec![
                     UsageWindow::new("Quota", 0.0)
@@ -511,6 +547,10 @@ impl<'a> Fetcher<'a> {
                 ],
                 format!("Antigravity ({account}) - no quota data"),
             );
+            if let Some(plan_id) = plan_id {
+                usage = usage.with_plan(plan_id);
+            }
+            return usage;
         }
 
         let mut models: Vec<&str> = buckets
@@ -532,21 +572,26 @@ impl<'a> Fetcher<'a> {
                     bucket.group_label,
                     plural(bucket.members.len(), "model")
                 );
-                // Below 10% the rounded integer reads as a cliff edge ("0%
-                // remaining" with requests still going through), so the last
-                // stretch keeps a decimal.
-                let remaining = if bucket.remaining_percent < 10.0 {
-                    format!("{:.1}% remaining", bucket.remaining_percent)
+                let (used, remaining) = if bucket.disabled {
+                    (100.0, "Disabled".to_string())
+                } else if bucket.remaining_percent < 10.0 {
+                    (
+                        bucket.used_percent,
+                        format!("{:.1}% remaining", bucket.remaining_percent),
+                    )
                 } else {
-                    format!("{:.0}% remaining", bucket.remaining_percent)
+                    (
+                        bucket.used_percent,
+                        format!("{:.0}% remaining", bucket.remaining_percent),
+                    )
                 };
-                UsageWindow::new(label, bucket.used_percent)
+                UsageWindow::new(label, used)
                     .reset(bucket.reset_countdown.clone())
                     .text(remaining)
             })
             .collect();
 
-        ProviderUsage::healthy(
+        let mut usage = ProviderUsage::healthy(
             Provider::Antigravity,
             windows,
             format!(
@@ -554,7 +599,42 @@ impl<'a> Fetcher<'a> {
                 plural(buckets.len(), "group"),
                 plural(models.len(), "model")
             ),
+        );
+        if let Some(plan_id) = plan_id {
+            usage = usage.with_plan(plan_id);
+        }
+        usage
+    }
+
+    /// Quota buckets from the local Antigravity language server, when agy
+    /// exposes its address and CSRF token to this process (it does for the
+    /// shells it spawns). Empty when unreachable, so callers fall back to
+    /// the direct API.
+    fn language_server_buckets(&self) -> Vec<antigravity::Bucket> {
+        let address = std::env::var("ANTIGRAVITY_LS_ADDRESS").unwrap_or_default();
+        let csrf = std::env::var("ANTIGRAVITY_CSRF_TOKEN").unwrap_or_default();
+        let address = address.trim();
+        let csrf = csrf.trim();
+        if address.is_empty() || csrf.is_empty() {
+            return Vec::new();
+        }
+        let base = if address.starts_with("http://") || address.starts_with("https://") {
+            address.trim_end_matches('/').to_string()
+        } else {
+            format!("http://{address}")
+        };
+        let request = HttpRequest::post(
+            format!("{base}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"),
+            "{}",
         )
+        .header("Content-Type", "application/json")
+        .header("x-codeium-csrf-token", csrf);
+        match self.http.send(&request) {
+            Ok(response) if response.is_success() => {
+                antigravity::parse_language_server_response(&response.body)
+            }
+            _ => Vec::new(),
+        }
     }
 
     fn google_email(&self, access_token: &str) -> String {
@@ -749,6 +829,7 @@ impl<'a> Fetcher<'a> {
         let mut model_api_key = key_override.to_string();
         let mut email = String::new();
         let mut tier = String::new();
+        let mut key_usage = Vec::new();
 
         if let Some(t) = &token {
             if !t.email.is_empty() {
@@ -775,6 +856,7 @@ impl<'a> Fetcher<'a> {
             if let Some(resp) = self.probe_json(key_req)
                 && let Some(info) = meta::parse_key_metadata(&resp.to_string())
             {
+                key_usage = meta::parse_subscription_usage(&resp.to_string(), now_unix());
                 if email.is_empty() && !info.email.is_empty() {
                     email = info.email;
                 }
@@ -792,6 +874,19 @@ impl<'a> Fetcher<'a> {
         }
         if model_api_key.is_empty() {
             return ProviderUsage::unconfigured(Provider::Meta);
+        }
+
+        let plan = SubscriptionPlan::new(Provider::Meta, &tier);
+        let plan_name = plan
+            .as_ref()
+            .map(|p| p.display_name.as_str())
+            .unwrap_or(tier.as_str());
+        let footer = account_footer("Meta Muse", &[&email, plan_name]);
+
+        if !key_usage.is_empty() {
+            let mut result = ProviderUsage::healthy(Provider::Meta, key_usage, footer);
+            result.plan = plan;
+            return result;
         }
 
         let body = serde_json::json!({
@@ -812,13 +907,6 @@ impl<'a> Fetcher<'a> {
             Ok(resp) => resp,
             Err(err) => return ProviderUsage::degraded(Provider::Meta, err),
         };
-
-        let plan = SubscriptionPlan::new(Provider::Meta, &tier);
-        let plan_name = plan
-            .as_ref()
-            .map(|p| p.display_name.as_str())
-            .unwrap_or(tier.as_str());
-        let footer = account_footer("Meta Muse", &[&email, plan_name]);
 
         if response.status == 429 {
             if let Some(window) = meta::parse_rate_limit(&response.body, now_unix()) {

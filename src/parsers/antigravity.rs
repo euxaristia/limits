@@ -30,7 +30,7 @@ impl Timeframe {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Bucket {
     pub group_label: String,
     pub members: Vec<String>,
@@ -38,23 +38,29 @@ pub struct Bucket {
     pub remaining_percent: f64,
     pub reset_countdown: String,
     pub timeframe: Timeframe,
+    pub disabled: bool,
 }
 
 /// Model families, ranked for display. Gemini first because it is the family
-/// Antigravity meters most tightly.
+/// Antigravity meters most tightly, followed by Claude & GPT, then Argon.
 fn family_rank(label: &str) -> u8 {
-    if label.eq_ignore_ascii_case("Gemini") {
+    let lower = label.to_ascii_lowercase();
+    if lower.contains("argon") {
+        2
+    } else if lower.starts_with("gemini") {
         0
-    } else if label.to_ascii_lowercase().starts_with("claude") {
+    } else if lower.starts_with("claude") {
         1
     } else {
-        2
+        3
     }
 }
 
 fn family_from_model_id(model_id: &str) -> &'static str {
     let m = model_id.to_ascii_lowercase();
-    if m.contains("gemini") {
+    if m.contains("argon") {
+        "Gemini 4 Argon"
+    } else if m.contains("gemini") {
         "Gemini"
     } else if m.contains("claude") || m.starts_with("gpt-") || m.starts_with("gpt_") {
         "Claude & GPT"
@@ -69,7 +75,9 @@ fn family_from_model_id(model_id: &str) -> &'static str {
 /// listing reads "Gemini Pro, Gemini Flash" rather than four dated variants.
 pub fn canonical_model_name(model_id: &str) -> String {
     let m = model_id.to_ascii_lowercase();
-    let name = if m.contains("flash-lite") || m.contains("flash_lite") || m.contains("flashlite") {
+    let name = if m.contains("argon") {
+        "Gemini 4 Argon"
+    } else if m.contains("flash-lite") || m.contains("flash_lite") || m.contains("flashlite") {
         "Gemini Flash-Lite"
     } else if m.contains("flash") {
         "Gemini Flash"
@@ -80,7 +88,7 @@ pub fn canonical_model_name(model_id: &str) -> String {
     } else if m.contains("opus") {
         "Claude Opus"
     } else if m.contains("gpt") {
-        "GPT"
+        "GPT-OSS"
     } else {
         return model_id.to_string();
     };
@@ -125,25 +133,84 @@ fn percentages(remaining_fraction: f64) -> (f64, f64) {
 
 /// Parse either response shape.
 pub fn parse(body: &str) -> Vec<Bucket> {
+    parse_combined(Some(body), Some(body))
+}
+
+/// Parse the local language server's RetrieveUserQuotaSummary reply, which
+/// wraps the summary object in a "response" field. The server's summary is
+/// complete (every group, Argon included), unlike the direct API summary.
+pub fn parse_language_server_response(body: &str) -> Vec<Bucket> {
     let Ok(root) = serde_json::from_str::<Value>(body) else {
         return Vec::new();
     };
+    let inner = root.get("response").unwrap_or(&root);
+    parse_combined(Some(&inner.to_string()), None)
+}
 
-    let mut buckets = match root.get("groups").and_then(Value::as_array) {
-        Some(groups) if !groups.is_empty() => from_groups(groups),
-        _ => match root.get("buckets").and_then(Value::as_array) {
-            Some(raw) => from_flat_buckets(raw),
-            None => return Vec::new(),
-        },
-    };
+/// Combine group summaries (which have window, disabled, and group metadata)
+/// with the flat per-model call (which covers models/tiers not yet rolled into groups).
+pub fn parse_combined(summary_json: Option<&str>, flat_json: Option<&str>) -> Vec<Bucket> {
+    let mut summary_buckets = summary_json
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .and_then(|v| {
+            v.get("groups")
+                .and_then(Value::as_array)
+                .map(|g| from_groups(g))
+        })
+        .unwrap_or_default();
 
+    let flat_buckets = flat_json
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .and_then(|v| {
+            v.get("buckets")
+                .and_then(Value::as_array)
+                .map(|b| from_flat_buckets(b))
+        })
+        .unwrap_or_default();
+
+    if summary_buckets.is_empty() {
+        return finalize_buckets(flat_buckets);
+    }
+    if flat_buckets.is_empty() {
+        return finalize_buckets(summary_buckets);
+    }
+
+    // A flat row is a duplicate only when the summary already carries the
+    // same family in the same window resetting at the same time. The same
+    // family in another window is a distinct allowance, not a repeat.
+    let known_rows: Vec<(String, Timeframe, String)> = summary_buckets
+        .iter()
+        .map(|b| {
+            (
+                b.group_label.clone(),
+                b.timeframe,
+                b.reset_countdown.clone(),
+            )
+        })
+        .collect();
+
+    for fb in flat_buckets {
+        let row = (
+            fb.group_label.clone(),
+            fb.timeframe,
+            fb.reset_countdown.clone(),
+        );
+        if !known_rows.contains(&row) {
+            summary_buckets.push(fb);
+        }
+    }
+
+    finalize_buckets(summary_buckets)
+}
+
+fn finalize_buckets(mut buckets: Vec<Bucket>) -> Vec<Bucket> {
     buckets.sort_by(|a, b| {
         family_rank(&a.group_label)
             .cmp(&family_rank(&b.group_label))
             .then(a.timeframe.cmp(&b.timeframe))
             .then_with(|| sort_key(&a.reset_countdown).cmp(&sort_key(&b.reset_countdown)))
     });
-    hide_sessions_under_a_spent_week(buckets)
+    mark_sessions_under_a_spent_week(buckets)
 }
 
 /// Rank by time to reset, with an unreadable countdown last rather than
@@ -164,7 +231,9 @@ fn from_groups(groups: &[Value]) -> Vec<Bucket> {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let lower = name.to_ascii_lowercase();
-        let family = if lower.starts_with("gemini") {
+        let family = if lower.contains("argon") {
+            "Gemini 4 Argon"
+        } else if lower.starts_with("gemini") {
             "Gemini"
         } else if lower.contains("claude") || lower.contains("gpt") {
             "Claude & GPT"
@@ -182,13 +251,10 @@ fn from_groups(groups: &[Value]) -> Vec<Bucket> {
             continue;
         };
         for entry in entries {
-            if entry
+            let disabled = entry
                 .get("disabled")
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                continue;
-            }
+                .unwrap_or(false);
             let remaining = entry
                 .get("remainingFraction")
                 .and_then(Value::as_f64)
@@ -215,6 +281,7 @@ fn from_groups(groups: &[Value]) -> Vec<Bucket> {
                 remaining_percent,
                 reset_countdown: countdown,
                 timeframe,
+                disabled,
             });
         }
     }
@@ -223,37 +290,42 @@ fn from_groups(groups: &[Value]) -> Vec<Bucket> {
 
 /// The models a group covers.
 ///
-/// The service's `description` is marketing copy rather than a model list, so
-/// the two families it actually meters are named explicitly. Anything else
-/// falls back to whatever follows a colon in the description.
+/// If the service's `description` lists models (separated by a colon and comma),
+/// we read them directly. Otherwise, fall back to known models per family.
 fn group_members(family: &str, description: &str) -> Vec<String> {
-    match family {
-        "Gemini" => ["Gemini 3.6 Flash", "Gemini 3.5 Flash", "Gemini 3.1 Pro"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-        "Claude & GPT" => ["Claude Sonnet 4.6", "Claude Opus 4.6", "GPT-OSS 120B"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-        _ => {
-            let list = match description.split_once(':') {
-                Some((_, rest)) => rest,
-                None => description,
-            };
-            list.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
+    if let Some((_, rest)) = description.split_once(':') {
+        let members: Vec<String> = rest
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        if !members.is_empty() {
+            return members;
         }
     }
+    match family {
+        "Gemini" => ["Gemini Flash", "Gemini Pro"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        "Claude & GPT" => ["Claude Opus", "Claude Sonnet", "GPT-OSS"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        "Gemini 4 Argon" => ["Gemini 4 Argon"].iter().map(|s| s.to_string()).collect(),
+        _ => Vec::new(),
+    }
 }
+
+/// One model's share of a flat bucket: canonical name, remaining fraction,
+/// and whether the service has disabled it.
+type FlatEntry = (String, f64, bool);
 
 fn from_flat_buckets(raw: &[Value]) -> Vec<Bucket> {
     // Grouped by family, window, and reset time: two models sharing all three
     // are sharing one allowance, so they belong on one row.
-    let mut groups: BTreeMap<(String, Timeframe, String), Vec<(String, f64)>> = BTreeMap::new();
+    let mut groups: BTreeMap<(String, Timeframe, String), Vec<FlatEntry>> = BTreeMap::new();
 
     for entry in raw {
         let Some(model_id) = entry.get("modelId").and_then(Value::as_str) else {
@@ -265,6 +337,10 @@ fn from_flat_buckets(raw: &[Value]) -> Vec<Bucket> {
             continue;
         }
 
+        let disabled = entry
+            .get("disabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let remaining = entry
             .get("remainingFraction")
             .and_then(Value::as_f64)
@@ -283,7 +359,7 @@ fn from_flat_buckets(raw: &[Value]) -> Vec<Bucket> {
                 countdown,
             ))
             .or_default()
-            .push((canonical_model_name(model_id), remaining));
+            .push((canonical_model_name(model_id), remaining, disabled));
     }
 
     groups
@@ -292,9 +368,10 @@ fn from_flat_buckets(raw: &[Value]) -> Vec<Bucket> {
             // The group is only as usable as its most depleted model.
             let lowest = entries
                 .iter()
-                .map(|(_, remaining)| *remaining)
+                .map(|(_, remaining, _)| *remaining)
                 .fold(f64::INFINITY, f64::min);
-            let mut members: Vec<String> = entries.into_iter().map(|(name, _)| name).collect();
+            let any_disabled = entries.iter().any(|(_, _, d)| *d);
+            let mut members: Vec<String> = entries.into_iter().map(|(name, _, _)| name).collect();
             members.sort();
             members.dedup();
 
@@ -306,28 +383,30 @@ fn from_flat_buckets(raw: &[Value]) -> Vec<Bucket> {
                 remaining_percent,
                 reset_countdown: countdown,
                 timeframe,
+                disabled: any_disabled,
             }
         })
         .collect()
 }
 
-/// Drop session rows for families whose weekly allowance is already spent.
-/// Session headroom under a spent week is not headroom.
-fn hide_sessions_under_a_spent_week(buckets: Vec<Bucket>) -> Vec<Bucket> {
-    let spent: Vec<&str> = buckets
+/// Mark session rows as disabled for families whose weekly allowance is already spent.
+/// Session headroom under a spent week does not apply.
+fn mark_sessions_under_a_spent_week(mut buckets: Vec<Bucket>) -> Vec<Bucket> {
+    let spent: Vec<String> = buckets
         .iter()
         .filter(|b| b.timeframe == Timeframe::Weekly && b.used_percent >= 100.0)
-        .map(|b| b.group_label.as_str())
+        .map(|b| b.group_label.clone())
         .collect();
     if spent.is_empty() {
         return buckets;
     }
-    let spent: Vec<String> = spent.into_iter().map(str::to_string).collect();
 
+    for b in &mut buckets {
+        if b.timeframe == Timeframe::Session && spent.contains(&b.group_label) {
+            b.disabled = true;
+        }
+    }
     buckets
-        .into_iter()
-        .filter(|b| b.timeframe != Timeframe::Session || !spent.contains(&b.group_label))
-        .collect()
 }
 
 #[cfg(test)]
@@ -479,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn a_spent_week_hides_that_family_s_session_row() {
+    fn a_spent_week_marks_that_family_s_session_row_disabled() {
         let json = format!(
             r#"{{"groups":[{{
                 "displayName":"Claude & GPT",
@@ -494,8 +573,11 @@ mod tests {
         );
         let buckets = parse(&json);
 
-        assert_eq!(buckets.len(), 1);
-        assert_eq!(buckets[0].timeframe, Timeframe::Weekly);
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].timeframe, Timeframe::Session);
+        assert!(buckets[0].disabled);
+        assert_eq!(buckets[1].timeframe, Timeframe::Weekly);
+        assert!(!buckets[1].disabled);
     }
 
     #[test]
@@ -515,18 +597,133 @@ mod tests {
         let buckets = parse(&json);
 
         assert_eq!(buckets.len(), 2);
-        assert!(buckets.iter().any(|b| b.timeframe == Timeframe::Session));
+        assert!(
+            buckets
+                .iter()
+                .any(|b| b.timeframe == Timeframe::Session && !b.disabled)
+        );
     }
 
     #[test]
-    fn disabled_buckets_are_skipped() {
+    fn disabled_buckets_are_preserved_as_disabled() {
         let json = format!(
             r#"{{"groups":[{{"displayName":"Gemini","description":"g","buckets":[
                 {{"remainingFraction":0.5,"resetTime":"{}","window":"5h","disabled":true}}
             ]}}]}}"#,
             in_hours(2)
         );
-        assert!(parse(&json).is_empty());
+        let buckets = parse(&json);
+        assert_eq!(buckets.len(), 1);
+        assert!(buckets[0].disabled);
+    }
+
+    #[test]
+    fn argon_is_recognized_as_its_own_family_and_ranked_after_claude() {
+        let reset = in_hours(4);
+        let json = format!(
+            r#"{{"buckets":[
+                {{"modelId":"claude-opus-4-6","remainingFraction":0.5,"resetTime":"{reset}"}},
+                {{"modelId":"gemini-4-argon","remainingFraction":0.0,"resetTime":"{reset}"}},
+                {{"modelId":"gemini-3-1-pro","remainingFraction":0.8,"resetTime":"{reset}"}}
+            ]}}"#
+        );
+        let buckets = parse(&json);
+
+        assert_eq!(buckets.len(), 3);
+        assert_eq!(buckets[0].group_label, "Gemini");
+        assert_eq!(buckets[1].group_label, "Claude & GPT");
+        assert_eq!(buckets[2].group_label, "Gemini 4 Argon");
+    }
+
+    #[test]
+    fn combined_merges_summary_groups_with_unrepresented_flat_buckets() {
+        let reset = in_hours(4);
+        let summary = format!(
+            r#"{{"groups":[{{
+                "displayName":"Claude and GPT models",
+                "description":"Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+                "buckets":[
+                    {{"remainingFraction":0.0,"resetTime":"{reset}","window":"weekly"}},
+                    {{"remainingFraction":1.0,"resetTime":"{reset}","window":"5h","disabled":true}}
+                ]
+            }}]}}"#
+        );
+        let flat = format!(
+            r#"{{"buckets":[
+                {{"modelId":"gemini-2.5-flash","remainingFraction":0.02,"resetTime":"{reset}"}},
+                {{"modelId":"gemini-4-argon","remainingFraction":0.0,"resetTime":"{reset}"}},
+                {{"modelId":"claude-opus-5-5-high","remainingFraction":0.0,"resetTime":"{reset}"}}
+            ]}}"#
+        );
+        let buckets = parse_combined(Some(&summary), Some(&flat));
+
+        assert_eq!(buckets.len(), 4);
+        assert_eq!(buckets[0].group_label, "Gemini");
+        assert_eq!(buckets[1].group_label, "Claude & GPT");
+        assert_eq!(buckets[1].timeframe, Timeframe::Session);
+        assert!(buckets[1].disabled);
+        assert_eq!(buckets[2].group_label, "Claude & GPT");
+        assert_eq!(buckets[2].timeframe, Timeframe::Weekly);
+        assert_eq!(buckets[3].group_label, "Gemini 4 Argon");
+    }
+
+    #[test]
+    fn combined_keeps_a_flat_window_the_summary_lacks_for_a_known_family() {
+        let weekly = in_hours(90);
+        let session = in_hours(2);
+        let summary = format!(
+            r#"{{"groups":[{{
+                "displayName":"Gemini models",
+                "description":"Models within this group: Gemini Flash, Gemini Pro",
+                "buckets":[
+                    {{"remainingFraction":0.5,"resetTime":"{weekly}","window":"weekly"}}
+                ]
+            }}]}}"#
+        );
+        let flat = format!(
+            r#"{{"buckets":[
+                {{"modelId":"gemini-3-1-pro","remainingFraction":0.5,"resetTime":"{weekly}"}},
+                {{"modelId":"gemini-3-1-pro","remainingFraction":0.9,"resetTime":"{session}"}}
+            ]}}"#
+        );
+        let buckets = parse_combined(Some(&summary), Some(&flat));
+
+        assert_eq!(buckets.len(), 2);
+        assert!(buckets.iter().all(|b| b.group_label == "Gemini"));
+        assert!(buckets.iter().any(|b| b.timeframe == Timeframe::Session));
+        assert!(buckets.iter().any(|b| b.timeframe == Timeframe::Weekly));
+    }
+
+    #[test]
+    fn language_server_payload_yields_every_group_including_argon() {
+        // Shape returned by the local language server's
+        // RetrieveUserQuotaSummary RPC: the summary object wrapped in
+        // a "response" field.
+        let body = r#"{"response":{"groups":[
+            {"displayName":"Gemini Models","description":"Models within this group: Gemini Flash, Gemini Pro","buckets":[
+                {"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0,"resetTime":"2026-10-23T22:58:28Z"},
+                {"bucketId":"gemini-5h","window":"5h","remainingFraction":0.93,"disabled":true,"resetTime":"2026-10-20T08:31:05Z"}
+            ]},
+            {"displayName":"Claude and GPT models","description":"Models within this group: Claude Opus, Claude Sonnet, GPT-OSS","buckets":[
+                {"bucketId":"3p-weekly","window":"weekly","remainingFraction":0,"resetTime":"2026-10-24T14:20:22Z"},
+                {"bucketId":"3p-5h","window":"5h","remainingFraction":1,"disabled":true,"resetTime":"2026-10-20T09:54:00Z"}
+            ]},
+            {"displayName":"Gemini 4 Argon","description":"For paid Pro plans, Argon quota is separate.","buckets":[
+                {"bucketId":"gemini-argon-wtu-weekly","window":"weekly","remainingFraction":0,"resetTime":"2026-10-24T03:14:08Z"}
+            ]}
+        ]}}"#;
+        let buckets = parse_language_server_response(body);
+
+        assert_eq!(buckets.len(), 5);
+        let labels: Vec<&str> = buckets.iter().map(|b| b.group_label.as_str()).collect();
+        assert!(labels.contains(&"Gemini"));
+        assert!(labels.contains(&"Claude & GPT"));
+        assert!(labels.contains(&"Gemini 4 Argon"));
+        let gemini_session = buckets
+            .iter()
+            .find(|b| b.group_label == "Gemini" && b.timeframe == Timeframe::Session)
+            .expect("Gemini session bucket");
+        assert!(gemini_session.disabled);
     }
 
     #[test]
@@ -537,9 +734,10 @@ mod tests {
         );
         assert_eq!(canonical_model_name("gemini-3-6-flash"), "Gemini Flash");
         assert_eq!(canonical_model_name("gemini-3-1-pro-low"), "Gemini Pro");
+        assert_eq!(canonical_model_name("gemini-4-argon"), "Gemini 4 Argon");
         assert_eq!(canonical_model_name("claude-sonnet-4-6"), "Claude Sonnet");
         assert_eq!(canonical_model_name("claude-opus-4-6"), "Claude Opus");
-        assert_eq!(canonical_model_name("gpt-oss-120b"), "GPT");
+        assert_eq!(canonical_model_name("gpt-oss-120b"), "GPT-OSS");
         assert_eq!(canonical_model_name("mystery-model"), "mystery-model");
     }
 

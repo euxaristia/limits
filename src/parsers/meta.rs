@@ -136,22 +136,40 @@ pub fn parse_rate_limit(raw: &str, now: i64) -> Option<UsageWindow> {
 /// }
 /// ```
 pub fn parse_subscription_usage(raw: &str, now: i64) -> Vec<UsageWindow> {
-    // Look for JSON object or SSE data line
-    let json_str = if let Some(idx) = raw.find("data:") {
-        let after = &raw[idx + 5..];
-        after.lines().next().unwrap_or(after).trim()
+    let data_payloads: Vec<&str> = raw
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("data:"))
+        .map(str::trim)
+        .filter(|payload| !payload.is_empty() && *payload != "[DONE]")
+        .collect();
+    let payloads = if data_payloads.is_empty() {
+        vec![raw.trim()]
     } else {
-        raw.trim()
+        data_payloads
     };
 
-    let Ok(value) = serde_json::from_str::<Value>(json_str) else {
-        return Vec::new();
-    };
+    for payload in payloads {
+        let Ok(value) = serde_json::from_str::<Value>(payload) else {
+            continue;
+        };
+        let windows = subscription_windows(&value, now);
+        if !windows.is_empty() {
+            return windows;
+        }
+    }
 
+    Vec::new()
+}
+
+fn subscription_windows(value: &Value, now: i64) -> Vec<UsageWindow> {
+    let response = value.get("response");
     let sub = value
         .get("subscription")
+        .or_else(|| value.get("subs_usage"))
         .or_else(|| value.get("usage"))
-        .unwrap_or(&value);
+        .or_else(|| response.and_then(|r| r.get("subscription")))
+        .or_else(|| response.and_then(|r| r.get("subs_usage")))
+        .unwrap_or(value);
 
     let mut windows = Vec::new();
 
@@ -246,5 +264,29 @@ mod tests {
         assert_eq!(windows[0].reset_countdown, "2h 0m");
         assert_eq!(windows[1].label, "Weekly");
         assert_eq!(windows[1].used_percent, 15.0);
+    }
+
+    #[test]
+    fn parses_subscription_usage_after_earlier_sse_events() {
+        let sse = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
+            "data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_test\"}}\n\n",
+            "data: {\"type\":\"response.subscription_usage\",\"subscription\":{\"window\":{\"used_percent\":50,\"window_duration_mins\":300,\"resets_at\":1792476353},\"weekly\":{\"used_percent\":50,\"resets_at\":1792972800}}}\n\n"
+        );
+        let windows = parse_subscription_usage(sse, 1792472753);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "Session (5h)");
+        assert_eq!(windows[0].used_percent, 50.0);
+        assert_eq!(windows[1].label, "Weekly");
+        assert_eq!(windows[1].used_percent, 50.0);
+    }
+
+    #[test]
+    fn parses_subs_usage_from_key_payload() {
+        let raw = r#"{"subs_usage":{"window":{"used_percent":25,"window_duration_mins":300,"resets_at":1792476353},"weekly":{"used_percent":10,"resets_at":1792972800},"tier":"test"}}"#;
+        let windows = parse_subscription_usage(raw, 1792472753);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].used_percent, 25.0);
+        assert_eq!(windows[1].used_percent, 10.0);
     }
 }
