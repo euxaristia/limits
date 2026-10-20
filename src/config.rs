@@ -83,7 +83,23 @@ pub fn save(config: &LimitsConfig) -> io::Result<()> {
 /// stores API keys and session credentials in plain text.
 pub fn save_to(path: &Path, config: &LimitsConfig) -> io::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700);
+            #[allow(clippy::collapsible_if)]
+            if let Err(e) = builder.create(parent) {
+                if e.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(e);
+                }
+            }
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(parent)?;
+        }
     }
     let data = serde_json::to_string_pretty(config)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -154,15 +170,19 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn config_file_has_owner_only_permissions() {
+    fn config_file_and_directory_have_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
+        let parent = dir.path().join("nested");
+        let path = parent.join("config.json");
 
         let config = LimitsConfig::default();
         save_to(&path, &config).unwrap();
 
-        let metadata = std::fs::metadata(&path).unwrap();
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        let dir_metadata = std::fs::metadata(&parent).unwrap();
+        assert_eq!(dir_metadata.permissions().mode() & 0o777, 0o700);
+
+        let file_metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(file_metadata.permissions().mode() & 0o777, 0o600);
     }
 }
