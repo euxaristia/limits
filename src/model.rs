@@ -130,26 +130,18 @@ impl Provider {
     }
 }
 
+// PERF: Zero-allocation case-insensitive provider resolution.
 impl From<&str> for Provider {
     fn from(value: &str) -> Self {
-        match value.to_ascii_lowercase().as_str() {
-            "codex" => Provider::Codex,
-            "openai" => Provider::OpenAi,
-            "claude" => Provider::Claude,
-            "cursor" => Provider::Cursor,
-            "gemini" => Provider::Gemini,
-            "deepseek" => Provider::DeepSeek,
-            "openrouter" => Provider::OpenRouter,
-            "elevenlabs" => Provider::ElevenLabs,
-            "groq" => Provider::Groq,
-            "bedrock" => Provider::Bedrock,
-            "antigravity" => Provider::Antigravity,
-            "grok" => Provider::Grok,
-            "copilot" => Provider::Copilot,
-            "opencode" => Provider::OpenCode,
-            "meta" | "muse" => Provider::Meta,
-            _ => Provider::Unknown,
+        for provider in Provider::ALL {
+            if value.eq_ignore_ascii_case(provider.id()) {
+                return provider;
+            }
         }
+        if value.eq_ignore_ascii_case("muse") {
+            return Provider::Meta;
+        }
+        Provider::Unknown
     }
 }
 
@@ -380,12 +372,27 @@ impl SubscriptionPlan {
         if id.is_empty() {
             return None;
         }
-        let normalized = id
-            .to_ascii_lowercase()
-            .replace(['_', '-'], " ")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        // PERF: Single-pass normalization without intermediate string allocations.
+        let mut normalized = String::with_capacity(id.len());
+        let mut in_whitespace = true;
+        for c in id.chars() {
+            let ch = match c {
+                '_' | '-' => ' ',
+                _ => c.to_ascii_lowercase(),
+            };
+            if ch.is_whitespace() {
+                if !in_whitespace {
+                    normalized.push(' ');
+                    in_whitespace = true;
+                }
+            } else {
+                normalized.push(ch);
+                in_whitespace = false;
+            }
+        }
+        if normalized.ends_with(' ') {
+            normalized.pop();
+        }
         let name = if provider == Provider::Copilot {
             normalized.strip_prefix("copilot ").unwrap_or(&normalized)
         } else {
@@ -430,17 +437,22 @@ impl SubscriptionPlan {
         {
             name.to_string()
         } else {
-            let title = name
-                .split_whitespace()
-                .map(|word| {
-                    let mut chars = word.chars();
-                    match chars.next() {
-                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                        None => String::new(),
+            // PERF: Single-pass title casing directly into output buffer.
+            let mut title = String::with_capacity(name.len());
+            let mut capitalize_next = true;
+            for c in name.chars() {
+                if c.is_whitespace() {
+                    title.push(c);
+                    capitalize_next = true;
+                } else if capitalize_next {
+                    for u in c.to_uppercase() {
+                        title.push(u);
                     }
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
+                    capitalize_next = false;
+                } else {
+                    title.push(c);
+                }
+            }
             if provider == Provider::Copilot {
                 format!("Copilot {title}")
             } else {
