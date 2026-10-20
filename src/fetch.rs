@@ -863,7 +863,9 @@ impl<'a> Fetcher<'a> {
                 if !info.tier.is_empty() {
                     tier = info.tier;
                 }
-                if model_api_key.is_empty() && let Some(k) = info.api_key {
+                if model_api_key.is_empty()
+                    && let Some(k) = info.api_key
+                {
                     model_api_key = k;
                 }
             }
@@ -1651,11 +1653,7 @@ mod tests {
     #[test]
     fn a_provider_without_credentials_is_unconfigured() {
         let http = FakeHttp::new(vec![]);
-        for id in [
-            "cursor",
-            "groq",
-            "bedrock",
-        ] {
+        for id in ["cursor", "groq", "bedrock"] {
             let usage = Fetcher::new(&http).fetch(&config(id));
             assert_eq!(
                 usage.status,
@@ -1664,9 +1662,18 @@ mod tests {
             );
         }
         for (id, key_fn) in [
-            ("openai", openai_key as fn(&ProviderConfig) -> Option<String>),
-            ("deepseek", deepseek_key as fn(&ProviderConfig) -> Option<String>),
-            ("openrouter", openrouter_key as fn(&ProviderConfig) -> Option<String>),
+            (
+                "openai",
+                openai_key as fn(&ProviderConfig) -> Option<String>,
+            ),
+            (
+                "deepseek",
+                deepseek_key as fn(&ProviderConfig) -> Option<String>,
+            ),
+            (
+                "openrouter",
+                openrouter_key as fn(&ProviderConfig) -> Option<String>,
+            ),
         ] {
             if key_fn(&config(id)).is_none() {
                 let usage = Fetcher::new(&http).fetch(&config(id));

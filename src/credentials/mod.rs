@@ -481,7 +481,6 @@ pub(crate) fn deepseek_key_candidates(
         .collect()
 }
 
-
 /// A keyring payload, which is either the bare key or the JSON blob a store
 /// that keeps more than the key writes.
 ///
@@ -627,8 +626,8 @@ pub(crate) fn parse_muse_auth(root: &Value) -> Option<Token> {
         .and_then(|p| p.get("meta"))
         .unwrap_or(root);
 
-    let access_token = string_at(meta_obj, "access_token")
-        .or_else(|| string_at(meta_obj, "accessToken"));
+    let access_token =
+        string_at(meta_obj, "access_token").or_else(|| string_at(meta_obj, "accessToken"));
 
     let api_key = string_at(meta_obj, "api_key")
         .or_else(|| string_at(meta_obj, "apiKey"))
@@ -1222,13 +1221,18 @@ mod tests {
             (service == "cairn-code" && account == Some("openai"))
                 .then(|| b"sk-openai-live".to_vec())
         });
-        assert_eq!(ai_candidates.first().map(String::as_str), Some("sk-openai-live"));
+        assert_eq!(
+            ai_candidates.first().map(String::as_str),
+            Some("sk-openai-live")
+        );
 
         let ds_candidates = deepseek_key_candidates(|service, account| {
-            (service == "cairn-code" && account == Some("deepseek"))
-                .then(|| b"sk-ds-live".to_vec())
+            (service == "cairn-code" && account == Some("deepseek")).then(|| b"sk-ds-live".to_vec())
         });
-        assert_eq!(ds_candidates.first().map(String::as_str), Some("sk-ds-live"));
+        assert_eq!(
+            ds_candidates.first().map(String::as_str),
+            Some("sk-ds-live")
+        );
     }
 
     #[test]

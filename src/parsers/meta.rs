@@ -83,13 +83,22 @@ pub fn parse_rate_limit(raw: &str, now: i64) -> Option<UsageWindow> {
     let value: Value = serde_json::from_str(raw).ok()?;
     let error = value.get("error")?.as_object()?;
 
-    let code = error.get("code").and_then(Value::as_str).unwrap_or_default();
-    let err_type = error.get("type").and_then(Value::as_str).unwrap_or_default();
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let err_type = error
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if code != "rate_limit_exceeded" && err_type != "rate_limit_error" {
         return None;
     }
 
-    let message = error.get("message").and_then(Value::as_str).unwrap_or_default();
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
 
     let resets_at = error
         .get("resets_at")
@@ -251,7 +260,10 @@ mod tests {
         assert_eq!(window.label, "Quota");
         assert_eq!(window.used_percent, 100.0);
         assert_eq!(window.reset_countdown, "1h 0m");
-        assert_eq!(window.percent_text_override.as_deref(), Some("0.0% remaining"));
+        assert_eq!(
+            window.percent_text_override.as_deref(),
+            Some("0.0% remaining")
+        );
     }
 
     #[test]
