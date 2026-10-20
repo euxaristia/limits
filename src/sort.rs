@@ -20,9 +20,11 @@ fn priority_rank(id: &str) -> usize {
         .unwrap_or(DISPLAY_PRIORITY.len())
 }
 
+// PERF: Optimized provider config sorting by using `sort_by_cached_key` to evaluate
+// priority ranks once per config rather than repeatedly during comparator calls.
 /// Order provider configs for display, before anything has been read.
 pub fn sort_configs(configs: &mut [ProviderConfig]) {
-    configs.sort_by_key(|config| priority_rank(&config.id));
+    configs.sort_by_cached_key(|config| priority_rank(&config.id));
 }
 
 /// Soonest reset first, with an unreadable countdown last.
@@ -34,29 +36,38 @@ fn soonest_reset(usage: &ProviderUsage) -> Option<i64> {
         .min()
 }
 
+// PERF: Pre-evaluate sort keys once per provider (`O(N)`) using `sort_by_cached_key`
+// instead of re-evaluating `is_exhausted`, `plan.tier`, `soonest_reset` string parsing,
+// and `priority_rank` during every element comparison (`O(N log N)`).
 /// Order readings: usable providers by plan tier, then spent ones by who
 /// recovers soonest. Provider priority breaks ties.
 pub fn sort_results(results: &mut [ProviderUsage]) {
-    results.sort_by(|a, b| {
-        let (a_spent, b_spent) = (a.is_exhausted(), b.is_exhausted());
-        a_spent
-            .cmp(&b_spent)
-            .then_with(|| {
-                if !a_spent {
-                    let a_tier = a.plan.as_ref().map(|plan| plan.tier).unwrap_or_default();
-                    let b_tier = b.plan.as_ref().map(|plan| plan.tier).unwrap_or_default();
-                    return b_tier.cmp(&a_tier);
-                }
-                // A provider that says when it comes back is more useful than
-                // one that does not, so an unknown reset sorts last.
-                match (soonest_reset(a), soonest_reset(b)) {
-                    (Some(a), Some(b)) => a.cmp(&b),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
-                }
-            })
-            .then_with(|| priority_rank(&a.id).cmp(&priority_rank(&b.id)))
+    results.sort_by_cached_key(|usage| {
+        let spent = usage.is_exhausted();
+        let tier = if !spent {
+            usage
+                .plan
+                .as_ref()
+                .map(|plan| plan.tier)
+                .unwrap_or_default()
+        } else {
+            crate::model::PlanTier::Other
+        };
+        let (no_reset, reset_secs) = if spent {
+            match soonest_reset(usage) {
+                Some(secs) => (false, secs),
+                None => (true, i64::MAX),
+            }
+        } else {
+            (false, 0)
+        };
+        (
+            spent,
+            std::cmp::Reverse(tier),
+            no_reset,
+            reset_secs,
+            priority_rank(&usage.id),
+        )
     });
 }
 
