@@ -321,6 +321,19 @@ fn check_control_chars(what: &str, value: &str) -> Result<(), HttpError> {
     Ok(())
 }
 
+fn check_header_name(name: &str) -> Result<(), HttpError> {
+    check_control_chars("header name", name)?;
+    if name
+        .chars()
+        .any(|c| c == ':' || c == '"' || c == '\\' || c.is_whitespace())
+    {
+        return Err(HttpError(format!(
+            "header name '{name}' contains invalid characters"
+        )));
+    }
+    Ok(())
+}
+
 static CONFIG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// A `curl --config` file holding the request headers, owner-readable only,
@@ -331,7 +344,7 @@ impl CurlConfig {
     fn write(headers: &[(String, String)]) -> Result<Self, HttpError> {
         let mut content = String::new();
         for (name, value) in headers {
-            check_control_chars("header name", name)?;
+            check_header_name(name)?;
             check_control_chars("header value", value)?;
             let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
             content.push_str(&format!("header = \"{name}: {escaped}\"\n"));
@@ -432,6 +445,24 @@ mod tests {
 
         let bad_url = HttpRequest::get("https://example.com/\nrogue");
         assert!(client.send(&bad_url).is_err());
+    }
+
+    #[test]
+    fn header_names_with_invalid_characters_are_rejected() {
+        let client = CurlClient::new();
+        for bad_name in [
+            "X-Test: Extra",
+            "X-Test\"Quote",
+            "X Test",
+            "X\\Test",
+            "X-Header\r\n",
+        ] {
+            let req = HttpRequest::get("https://example.com").header(bad_name, "value");
+            assert!(
+                client.send(&req).is_err(),
+                "header name {bad_name:?} should be rejected"
+            );
+        }
     }
 
     #[test]
