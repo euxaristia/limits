@@ -464,11 +464,11 @@ fn draw_windows(frame: &mut Frame, area: Rect, provider: &LiveProvider) {
         return;
     }
     let now = now_unix();
-    let rows = Layout::vertical(
-        (0..area.height)
-            .map(|_| Constraint::Length(1))
-            .collect::<Vec<_>>(),
-    )
+    // PERF: Avoid allocating a Vec<Constraint> on every frame.
+    let rows = Layout::vertical(std::iter::repeat_n(
+        Constraint::Length(1),
+        area.height as usize,
+    ))
     .split(area);
 
     for (index, window) in provider.windows.iter().enumerate() {
@@ -556,18 +556,16 @@ fn sparkline(points: &[f64], width: usize) -> String {
     if width == 0 {
         return String::new();
     }
-    points
-        .iter()
-        .rev()
-        .take(width)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|percent| {
-            let index = ((percent.clamp(0.0, 100.0) / 100.0) * (BLOCKS.len() - 1) as f64).round();
-            BLOCKS[index as usize]
-        })
-        .collect()
+    // PERF: Slice the trailing `width` elements directly to avoid allocating an
+    // intermediate Vec<&f64> and reversing iterators twice on every TUI frame.
+    let start = points.len().saturating_sub(width);
+    let slice = &points[start..];
+    let mut out = String::with_capacity(slice.len());
+    for &percent in slice {
+        let index = ((percent.clamp(0.0, 100.0) / 100.0) * (BLOCKS.len() - 1) as f64).round();
+        out.push(BLOCKS[index as usize]);
+    }
+    out
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
