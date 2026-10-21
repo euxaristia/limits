@@ -1,3 +1,7 @@
+## 2026-04-02 - TUI render loop string reference and compile-time constant optimization
+**Learning:** The TUI dashboard redrawing loop fires every 250ms (4 FPS). Dynamic `format!` calls for static application versions, title blocks, and footer/error lines created ~7 intermediate heap `String` allocations per frame. Utilizing compile-time `concat!`, borrowing string slices (`&str`) directly into Ratatui `Span`s, and combining nested countdown `format!` blocks into single spans eliminates all heap string allocations across the TUI rendering pipeline.
+**Action:** In high-frequency UI render loops, compose Ratatui `Line`s and `Title`s from borrowed `Span` references and static strings rather than allocating formatted `String`s.
+
 ## 2026-04-01 - Zero-allocation provider resolution and single-pass plan normalization
 **Learning:** `Provider::from` and `SubscriptionPlan::new` are invoked during configuration parsing, provider lookups, and snapshot generation. Matching on `value.to_ascii_lowercase().as_str()` allocates a heap `String` on every invocation. Replacing it with `eq_ignore_ascii_case` over `Provider::ALL` eliminates allocations entirely. Similarly, replacing `.to_ascii_lowercase().replace(...).split_whitespace().collect().join(...)` string pipelines in `SubscriptionPlan::new` with single-pass `String::with_capacity` loops eliminates 6+ intermediate heap allocations.
 **Action:** Prefer `eq_ignore_ascii_case` over `to_ascii_lowercase()` for enum parsing from string slices, and use single-pass character iterators for string normalization/title-casing.
