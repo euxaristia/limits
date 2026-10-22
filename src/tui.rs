@@ -10,9 +10,11 @@
 //! network call, and a provider that stops answering would otherwise freeze
 //! every keystroke for the whole timeout.
 
+use crate::Limits;
 use crate::model::{ProviderUsage, Status, UsageWindow};
 use crate::time::{countdown_between, countdown_seconds, now_unix};
-use crate::{Limits, VERSION};
+
+const VERSION_BANNER: &str = concat!(" limits v", env!("CARGO_PKG_VERSION"), " ");
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -171,11 +173,16 @@ impl App {
             .collect()
     }
 
-    fn selected_provider(&self) -> Option<&LiveProvider> {
-        let visible = self.visible();
+    // PERF: Avoid re-evaluating `visible()` and allocating a `Vec<&LiveProvider>`
+    // when a pre-computed `visible` slice is already available during layout rendering.
+    fn selected_provider_from<'a>(&self, visible: &[&'a LiveProvider]) -> Option<&'a LiveProvider> {
         visible
             .get(self.selected.min(visible.len().saturating_sub(1)))
             .copied()
+    }
+
+    fn selected_provider(&self) -> Option<&LiveProvider> {
+        self.selected_provider_from(&self.visible())
     }
 
     fn apply(&mut self, results: Vec<ProviderUsage>) {
@@ -303,7 +310,7 @@ fn draw(frame: &mut Frame, app: &App) {
         let [list, detail] =
             Layout::horizontal([Constraint::Length(list_width), Constraint::Fill(1)]).areas(body);
         draw_list(frame, list, app, &visible);
-        draw_detail(frame, detail, app);
+        draw_detail(frame, detail, app, &visible);
     }
 
     draw_footer(frame, footer, app);
@@ -321,7 +328,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let elapsed = app.started.elapsed().as_secs();
     let line = Line::from(vec![
         Span::styled(
-            format!(" limits v{VERSION} "),
+            VERSION_BANNER,
             Style::new()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -405,8 +412,8 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App, visible: &[&LiveProvider]
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(provider) = app.selected_provider() else {
+fn draw_detail(frame: &mut Frame, area: Rect, app: &App, visible: &[&LiveProvider]) {
+    let Some(provider) = app.selected_provider_from(visible) else {
         return;
     };
     let usage = &provider.usage;
@@ -532,11 +539,13 @@ fn draw_trend(frame: &mut Frame, area: Rect, app: &App, id: &str) {
     let line = if points.len() < 2 {
         Line::styled("trend (% left)  (collecting…)", dim())
     } else {
-        let remaining: Vec<f64> = points.iter().map(|used| 100.0 - used).collect();
+        // PERF: Render sparkline directly from used percentage points, transforming to
+        // remaining capacity (100.0 - used) on the fly to avoid allocating a Vec<f64>
+        // on every frame.
         Line::from(vec![
             Span::styled("trend (% left)  ", dim()),
             Span::styled(
-                sparkline(&remaining, area.width.saturating_sub(16) as usize),
+                sparkline(points, area.width.saturating_sub(16) as usize),
                 Style::new().fg(severity(*points.last().unwrap_or(&0.0))),
             ),
         ])
@@ -544,11 +553,11 @@ fn draw_trend(frame: &mut Frame, area: Rect, app: &App, id: &str) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// Render percentages as block characters.
+/// Render remaining capacity percentage as block characters from used points.
 ///
 /// The scale is fixed at 0-100 rather than fitted to the data: an
 /// auto-scaled spark makes a drift from 40% to 41% look like a cliff.
-fn sparkline(points: &[f64], width: usize) -> String {
+fn sparkline(used_points: &[f64], width: usize) -> String {
     const BLOCKS: [char; 8] = [
         '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
         '\u{2588}',
@@ -558,10 +567,11 @@ fn sparkline(points: &[f64], width: usize) -> String {
     }
     // PERF: Slice the trailing `width` elements directly to avoid allocating an
     // intermediate Vec<&f64> and reversing iterators twice on every TUI frame.
-    let start = points.len().saturating_sub(width);
-    let slice = &points[start..];
+    let start = used_points.len().saturating_sub(width);
+    let slice = &used_points[start..];
     let mut out = String::with_capacity(slice.len());
-    for &percent in slice {
+    for &used in slice {
+        let percent = 100.0 - used;
         let index = ((percent.clamp(0.0, 100.0) / 100.0) * (BLOCKS.len() - 1) as f64).round();
         out.push(BLOCKS[index as usize]);
     }
@@ -852,9 +862,9 @@ mod tests {
 
     #[test]
     fn the_spark_uses_a_fixed_scale_so_small_drifts_stay_small() {
-        assert_eq!(sparkline(&[0.0, 100.0], 8), "\u{2581}\u{2588}");
+        assert_eq!(sparkline(&[100.0, 0.0], 8), "\u{2581}\u{2588}");
         // A drift of one point must not paint as a full-height swing.
-        assert_eq!(sparkline(&[40.0, 41.0], 8), "\u{2584}\u{2584}");
+        assert_eq!(sparkline(&[60.0, 59.0], 8), "\u{2584}\u{2584}");
         assert_eq!(sparkline(&[50.0], 0), "");
     }
 
@@ -863,10 +873,10 @@ mod tests {
         let points: Vec<f64> = (0..=10).map(|n| n as f64 * 10.0).collect();
         let spark = sparkline(&points, 3);
 
-        // The last three readings are 80, 90, 100 — the oldest are dropped,
+        // The last three readings are 80, 90, 100 used (20, 10, 0 remaining) — the oldest are dropped,
         // not the newest.
         assert_eq!(spark.chars().count(), 3);
-        assert_eq!(spark.chars().next_back(), Some('\u{2588}'));
+        assert_eq!(spark.chars().next_back(), Some('\u{2581}'));
         assert_eq!(spark, sparkline(&[80.0, 90.0, 100.0], 3));
     }
 
