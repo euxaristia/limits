@@ -17,3 +17,8 @@
 **Vulnerability:** `save_to` set owner-only permissions (`0o600`) on `config.json`, but `std::fs::create_dir_all` created missing parent directories using default umask (`0o755`), leaving the directory world-readable and searchable by local users.
 **Learning:** Restricting file permissions alone is insufficient if the parent directory permissions allow local users to traverse or inspect metadata.
 **Prevention:** Use `DirBuilderExt::mode(0o700)` and `set_permissions` when creating credential-bearing configuration directories on Unix systems.
+
+## 2026-04-02 - Temporary curl configuration files missing explicit owner-only permissions
+**Vulnerability:** `CurlConfig::write` created temporary `.conf` files holding Authorization headers and session cookies using `OpenOptionsExt::mode(0o600)` without `set_permissions`, which could inherit default umask permissions on existing files or specific platforms.
+**Learning:** Setting `mode(0o600)` via `OpenOptionsExt` is modified by the umask at file creation. Explicitly calling `file.set_permissions` guarantees `0o600` permissions.
+**Prevention:** Always call `file.set_permissions(Permissions::from_mode(0o600))` after opening sensitive temporary configuration files on Unix systems.
