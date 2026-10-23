@@ -351,7 +351,15 @@ fn config_command(words: &[String]) -> i32 {
             0
         }
         "show" => {
-            let config = config::load();
+            let mut config = config::load();
+            for provider in &mut config.providers {
+                if provider.has_api_key() {
+                    provider.api_key = "[REDACTED]".to_string();
+                }
+                if provider.has_cookie() {
+                    provider.cookie_header = "[REDACTED]".to_string();
+                }
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".into())
@@ -737,5 +745,49 @@ mod tests {
         assert!(!use_color());
         assert_eq!(bold("x"), "x");
         assert_eq!(red("x"), "x");
+    }
+
+    #[test]
+    fn config_show_redacts_sensitive_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_file = dir.path().join("config.json");
+        unsafe {
+            std::env::set_var("LIMITS_CONFIG", &config_file);
+        }
+
+        let mut cfg = LimitsConfig::default();
+        if let Some(p) = cfg.get_mut("openai") {
+            p.api_key = "sk-secret-key-12345".into();
+            p.cookie_header = "session=secret-cookie-val".into();
+        }
+        config::save_to(&config_file, &cfg).unwrap();
+
+        let status = config_command(&["show".to_string()]);
+        assert_eq!(status, 0);
+
+        // Confirm that disk config is unchanged while in-memory display copy is redacted
+        let disk_config = config::load();
+        let openai = disk_config.get("openai").unwrap();
+        assert_eq!(openai.api_key, "sk-secret-key-12345");
+        assert_eq!(openai.cookie_header, "session=secret-cookie-val");
+
+        let mut display_config = disk_config;
+        for provider in &mut display_config.providers {
+            if provider.has_api_key() {
+                provider.api_key = "[REDACTED]".to_string();
+            }
+            if provider.has_cookie() {
+                provider.cookie_header = "[REDACTED]".to_string();
+            }
+        }
+        let json = serde_json::to_string_pretty(&display_config).unwrap();
+        assert!(json.contains(r#""apiKey": "[REDACTED]""#));
+        assert!(json.contains(r#""cookieHeader": "[REDACTED]""#));
+        assert!(!json.contains("sk-secret-key-12345"));
+        assert!(!json.contains("secret-cookie-val"));
+
+        unsafe {
+            std::env::remove_var("LIMITS_CONFIG");
+        }
     }
 }
