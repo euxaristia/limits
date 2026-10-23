@@ -10,9 +10,9 @@
 //! network call, and a provider that stops answering would otherwise freeze
 //! every keystroke for the whole timeout.
 
+use crate::Limits;
 use crate::model::{ProviderUsage, Status, UsageWindow};
 use crate::time::{countdown_between, countdown_seconds, now_unix};
-use crate::{Limits, VERSION};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -173,6 +173,11 @@ impl App {
 
     fn selected_provider(&self) -> Option<&LiveProvider> {
         let visible = self.visible();
+        self.selected_provider_from(&visible)
+    }
+
+    // PERF: Zero-allocation provider lookup when the visible slice is already computed.
+    fn selected_provider_from<'a>(&self, visible: &[&'a LiveProvider]) -> Option<&'a LiveProvider> {
         visible
             .get(self.selected.min(visible.len().saturating_sub(1)))
             .copied()
@@ -303,7 +308,7 @@ fn draw(frame: &mut Frame, app: &App) {
         let [list, detail] =
             Layout::horizontal([Constraint::Length(list_width), Constraint::Fill(1)]).areas(body);
         draw_list(frame, list, app, &visible);
-        draw_detail(frame, detail, app);
+        draw_detail(frame, detail, app, &visible);
     }
 
     draw_footer(frame, footer, app);
@@ -319,9 +324,10 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     let elapsed = app.started.elapsed().as_secs();
+    // PERF: Use static version string slice to avoid per-frame String formatting.
     let line = Line::from(vec![
         Span::styled(
-            format!(" limits v{VERSION} "),
+            concat!(" limits v", env!("CARGO_PKG_VERSION"), " "),
             Style::new()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -405,8 +411,9 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App, visible: &[&LiveProvider]
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(provider) = app.selected_provider() else {
+// PERF: Reuse pre-computed visible providers slice to avoid re-filtering and re-allocating `Vec<&LiveProvider>`.
+fn draw_detail(frame: &mut Frame, area: Rect, app: &App, visible: &[&LiveProvider]) {
+    let Some(provider) = app.selected_provider_from(visible) else {
         return;
     };
     let usage = &provider.usage;
@@ -478,11 +485,12 @@ fn draw_windows(frame: &mut Frame, area: Rect, provider: &LiveProvider) {
             break;
         }
 
+        // PERF: Streamline reset countdown formatting to avoid redundant intermediate String allocations.
         let countdown = window.countdown(now);
-        let reset = if countdown.is_empty() {
-            String::new()
+        let reset_str = if countdown.is_empty() {
+            "   ".to_string()
         } else {
-            format!("resets {countdown}")
+            format!("   resets {countdown}")
         };
         let remaining = window.window.remaining_percent();
         frame.render_widget(
@@ -498,7 +506,7 @@ fn draw_windows(frame: &mut Frame, area: Rect, provider: &LiveProvider) {
                         .map(|_| severity(window.window.used_percent))
                         .unwrap_or(Color::DarkGray)),
                 ),
-                Span::styled(format!("   {reset}"), dim()),
+                Span::styled(reset_str, dim()),
             ])),
             rows[label_row],
         );
@@ -591,7 +599,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         ),
         ("+/-", "interval"),
     ];
-    let mut spans = Vec::new();
+    // PERF: Pre-allocate capacity for exact number of spans in footer.
+    let mut spans = Vec::with_capacity(15);
     for (index, (key, action)) in keys.iter().enumerate() {
         if index > 0 {
             spans.push(Span::styled(" \u{b7} ", dim()));
