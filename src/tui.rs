@@ -45,16 +45,28 @@ const CRITICAL_AT: f64 = 90.0;
 /// The provider states a countdown, not a deadline. Turning it into a deadline
 /// once, at fetch time, is what lets the display tick every second without
 /// re-reading anything.
+// PERF: Precomputed display strings and percentages stored on LiveWindow and
+// LiveProvider at fetch time to eliminate string re-formatting, cloning, and
+// override parsing on every 250ms render frame.
 #[derive(Clone, Debug)]
 struct LiveWindow {
     window: UsageWindow,
     resets_at: Option<i64>,
+    remaining_percent: Option<f64>,
+    remaining_text: String,
 }
 
 impl LiveWindow {
     fn new(window: UsageWindow, fetched_at: i64) -> Self {
         let resets_at = countdown_seconds(&window.reset_countdown).map(|s| fetched_at + s);
-        LiveWindow { window, resets_at }
+        let remaining_percent = window.remaining_percent();
+        let remaining_text = window.remaining_text();
+        LiveWindow {
+            window,
+            resets_at,
+            remaining_percent,
+            remaining_text,
+        }
     }
 
     /// The countdown as of now, not as of the last poll.
@@ -70,17 +82,42 @@ impl LiveWindow {
 struct LiveProvider {
     usage: ProviderUsage,
     windows: Vec<LiveWindow>,
+    remaining_percent: Option<f64>,
+    sidebar_label: String,
+    sidebar_color: Color,
 }
 
 impl LiveProvider {
     fn new(usage: ProviderUsage, fetched_at: i64) -> Self {
-        let windows = usage
+        let windows: Vec<LiveWindow> = usage
             .windows
             .iter()
             .cloned()
             .map(|w| LiveWindow::new(w, fetched_at))
             .collect();
-        LiveProvider { usage, windows }
+        let remaining_percent = usage.remaining_percent();
+        let (sidebar_label, sidebar_color) = match usage.status {
+            Status::Healthy => match remaining_percent {
+                Some(left) => (format!("{left:>5.1}% left"), severity(100.0 - left)),
+                None if !usage.windows.is_empty()
+                    && usage.windows.iter().all(|window| {
+                        window.percent_text_override.as_deref() == Some("Unlimited")
+                    }) =>
+                {
+                    ("Unlimited".to_string(), Color::DarkGray)
+                }
+                None => ("  --".to_string(), Color::DarkGray),
+            },
+            Status::Degraded => ("  err".to_string(), Color::Yellow),
+            Status::Unconfigured => ("   --".to_string(), Color::DarkGray),
+        };
+        LiveProvider {
+            usage,
+            windows,
+            remaining_percent,
+            sidebar_label,
+            sidebar_color,
+        }
     }
 }
 
@@ -367,22 +404,6 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App, visible: &[&LiveProvider]
             let selected = index == app.selected;
             let marker = if selected { "\u{25b8} " } else { "  " };
 
-            let (label, colour) = match provider.usage.status {
-                Status::Healthy => match provider.usage.remaining_percent() {
-                    Some(left) => (format!("{left:>5.1}% left"), severity(100.0 - left)),
-                    None if !provider.usage.windows.is_empty()
-                        && provider.usage.windows.iter().all(|window| {
-                            window.percent_text_override.as_deref() == Some("Unlimited")
-                        }) =>
-                    {
-                        ("Unlimited".to_string(), Color::DarkGray)
-                    }
-                    None => ("  --".to_string(), Color::DarkGray),
-                },
-                Status::Degraded => ("  err".to_string(), Color::Yellow),
-                Status::Unconfigured => ("   --".to_string(), Color::DarkGray),
-            };
-
             let mut name = Style::new();
             if selected {
                 name = name.add_modifier(Modifier::BOLD);
@@ -397,7 +418,10 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App, visible: &[&LiveProvider]
                     format!("{:<w$} ", provider.usage.display_name, w = 16),
                     name,
                 ),
-                Span::styled(label, Style::new().fg(colour)),
+                Span::styled(
+                    &provider.sidebar_label,
+                    Style::new().fg(provider.sidebar_color),
+                ),
             ])
         })
         .collect();
@@ -479,33 +503,32 @@ fn draw_windows(frame: &mut Frame, area: Rect, provider: &LiveProvider) {
         }
 
         let countdown = window.countdown(now);
-        let reset = if countdown.is_empty() {
+        let reset_text = if countdown.is_empty() {
             String::new()
         } else {
-            format!("resets {countdown}")
+            format!("   resets {countdown}")
         };
-        let remaining = window.window.remaining_percent();
+        let color = window
+            .remaining_percent
+            .map(|_| severity(window.window.used_percent))
+            .unwrap_or(Color::DarkGray);
+
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
-                    window.window.label.clone(),
+                    &window.window.label,
                     Style::new().add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
-                Span::styled(
-                    window.window.remaining_text(),
-                    Style::new().fg(remaining
-                        .map(|_| severity(window.window.used_percent))
-                        .unwrap_or(Color::DarkGray)),
-                ),
-                Span::styled(format!("   {reset}"), dim()),
+                Span::styled(&window.remaining_text, Style::new().fg(color)),
+                Span::styled(reset_text, dim()),
             ])),
             rows[label_row],
         );
 
         // `ratio` rather than `percent` so a bar does not snap to whole
         // percentage points as the number creeps.
-        if let Some(remaining) = remaining {
+        if let Some(remaining) = window.remaining_percent {
             frame.render_widget(
                 Gauge::default()
                     .ratio(remaining / 100.0)
@@ -524,7 +547,7 @@ fn draw_trend(frame: &mut Frame, area: Rect, app: &App, id: &str) {
         || !app
             .providers
             .iter()
-            .any(|provider| provider.usage.id == id && provider.usage.remaining_percent().is_some())
+            .any(|provider| provider.usage.id == id && provider.remaining_percent.is_some())
     {
         return;
     }
