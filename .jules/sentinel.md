@@ -17,3 +17,8 @@
 **Vulnerability:** `save_to` set owner-only permissions (`0o600`) on `config.json`, but `std::fs::create_dir_all` created missing parent directories using default umask (`0o755`), leaving the directory world-readable and searchable by local users.
 **Learning:** Restricting file permissions alone is insufficient if the parent directory permissions allow local users to traverse or inspect metadata.
 **Prevention:** Use `DirBuilderExt::mode(0o700)` and `set_permissions` when creating credential-bearing configuration directories on Unix systems.
+
+## 2026-04-02 - Credential and email leakage in curl process error messages
+**Vulnerability:** `CurlClient::send` included unformatted `curl` subprocess `stderr` directly in `HttpError` when `curl` failed, leaking request authorization bearer tokens, session cookies, and email addresses.
+**Learning:** Subprocess stderr diagnostics during network transport failures can echo header contents and request values into returned errors.
+**Prevention:** Sanitize subprocess error outputs against request header credentials and email patterns before wrapping into application errors.
