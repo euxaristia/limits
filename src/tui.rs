@@ -532,11 +532,12 @@ fn draw_trend(frame: &mut Frame, area: Rect, app: &App, id: &str) {
     let line = if points.len() < 2 {
         Line::styled("trend (% left)  (collecting…)", dim())
     } else {
-        let remaining: Vec<f64> = points.iter().map(|used| 100.0 - used).collect();
+        // PERF: Pass `points` (which store used_percent) directly to `sparkline`
+        // without allocating an intermediate `Vec<f64>` for `100.0 - used`.
         Line::from(vec![
             Span::styled("trend (% left)  ", dim()),
             Span::styled(
-                sparkline(&remaining, area.width.saturating_sub(16) as usize),
+                sparkline(points, area.width.saturating_sub(16) as usize),
                 Style::new().fg(severity(*points.last().unwrap_or(&0.0))),
             ),
         ])
@@ -548,7 +549,7 @@ fn draw_trend(frame: &mut Frame, area: Rect, app: &App, id: &str) {
 ///
 /// The scale is fixed at 0-100 rather than fitted to the data: an
 /// auto-scaled spark makes a drift from 40% to 41% look like a cliff.
-fn sparkline(points: &[f64], width: usize) -> String {
+fn sparkline(used_points: &[f64], width: usize) -> String {
     const BLOCKS: [char; 8] = [
         '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
         '\u{2588}',
@@ -557,12 +558,14 @@ fn sparkline(points: &[f64], width: usize) -> String {
         return String::new();
     }
     // PERF: Slice the trailing `width` elements directly to avoid allocating an
-    // intermediate Vec<&f64> and reversing iterators twice on every TUI frame.
-    let start = points.len().saturating_sub(width);
-    let slice = &points[start..];
+    // intermediate Vec<&f64>. `used_points` are converted to `remaining` on the fly
+    // (100.0 - used) to avoid allocating an intermediate `Vec<f64>` during render.
+    let start = used_points.len().saturating_sub(width);
+    let slice = &used_points[start..];
     let mut out = String::with_capacity(slice.len());
-    for &percent in slice {
-        let index = ((percent.clamp(0.0, 100.0) / 100.0) * (BLOCKS.len() - 1) as f64).round();
+    for &used in slice {
+        let remaining = 100.0 - used;
+        let index = ((remaining.clamp(0.0, 100.0) / 100.0) * (BLOCKS.len() - 1) as f64).round();
         out.push(BLOCKS[index as usize]);
     }
     out
@@ -852,9 +855,11 @@ mod tests {
 
     #[test]
     fn the_spark_uses_a_fixed_scale_so_small_drifts_stay_small() {
-        assert_eq!(sparkline(&[0.0, 100.0], 8), "\u{2581}\u{2588}");
+        // sparkline takes used_percent and renders remaining (100 - used).
+        // used 100.0 => 0% remaining ('\u{2581}'), used 0.0 => 100% remaining ('\u{2588}')
+        assert_eq!(sparkline(&[100.0, 0.0], 8), "\u{2581}\u{2588}");
         // A drift of one point must not paint as a full-height swing.
-        assert_eq!(sparkline(&[40.0, 41.0], 8), "\u{2584}\u{2584}");
+        assert_eq!(sparkline(&[60.0, 59.0], 8), "\u{2584}\u{2584}");
         assert_eq!(sparkline(&[50.0], 0), "");
     }
 
@@ -863,10 +868,10 @@ mod tests {
         let points: Vec<f64> = (0..=10).map(|n| n as f64 * 10.0).collect();
         let spark = sparkline(&points, 3);
 
-        // The last three readings are 80, 90, 100 — the oldest are dropped,
-        // not the newest.
+        // The last three readings are used = 80, 90, 100 => remaining = 20, 10, 0 —
+        // the oldest are dropped, not the newest.
         assert_eq!(spark.chars().count(), 3);
-        assert_eq!(spark.chars().next_back(), Some('\u{2588}'));
+        assert_eq!(spark.chars().next_back(), Some('\u{2581}'));
         assert_eq!(spark, sparkline(&[80.0, 90.0, 100.0], 3));
     }
 
