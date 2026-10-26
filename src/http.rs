@@ -371,6 +371,11 @@ impl CurlConfig {
 
             match options.open(&path) {
                 Ok(mut file) => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+                    }
                     return match file.write_all(content.as_bytes()) {
                         Ok(()) => Ok(CurlConfig(path)),
                         Err(e) => {
@@ -473,6 +478,15 @@ mod tests {
         assert!(path.exists());
         drop(config);
         assert!(!path.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn curl_config_file_has_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let config = CurlConfig::write(&[("Authorization".into(), "Bearer test".into())]).unwrap();
+        let metadata = std::fs::metadata(config.path()).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
     }
 
     #[test]
