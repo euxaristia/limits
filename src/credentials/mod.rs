@@ -570,6 +570,19 @@ pub(crate) fn parse_antigravity(root: &Value) -> Option<Token> {
     })
 }
 
+/// Every keyring entry that may hold a Meta Muse credential, canonical first.
+///
+/// Muse 1.4 with `storage: "keychain"` keeps the OAuth payload in the
+/// login keychain under its own service and the provider slot as the account;
+/// the `auth.json` beside it then carries metadata only, no token. The
+/// cairn-code entries written by that host's own login follow.
+const META_KEYRING_ENTRIES: [(&str, Option<&str>); 4] = [
+    ("ai.meta.dev.credentials", Some("meta")),
+    ("cairn-code", Some("oauth:meta")),
+    ("cairn-code", Some("meta")),
+    ("muse", None),
+];
+
 /// Meta Muse credentials, checking the CLI's auth.json, OS keyring entries,
 /// and environment variables.
 pub fn load_meta() -> Option<Token> {
@@ -581,17 +594,8 @@ pub fn load_meta() -> Option<Token> {
         }
     }
 
-    for (service, account) in [
-        ("cairn-code", Some("oauth:meta")),
-        ("cairn-code", Some("meta")),
-        ("muse", None),
-    ] {
-        if let Some(data) = keyring::read(service, account)
-            && let Ok(value) = serde_json::from_slice::<Value>(&data)
-            && let Some(token) = parse_muse_auth(&value)
-        {
-            return Some(token);
-        }
+    if let Some(token) = meta_keyring_candidates(keyring::read).into_iter().next() {
+        return Some(token);
     }
 
     for var in ["MUSE_API_KEY", "META_MODEL_API_KEY", "META_API_KEY"] {
@@ -610,10 +614,41 @@ pub fn load_meta() -> Option<Token> {
     None
 }
 
+/// Every Meta Muse credential this machine holds in the OS keyring,
+/// canonical store first. The keyring reader is injected so the ordering can
+/// be tested without one.
+fn meta_keyring_candidates(read: impl Fn(&str, Option<&str>) -> Option<Vec<u8>>) -> Vec<Token> {
+    META_KEYRING_ENTRIES
+        .iter()
+        .filter_map(|(service, account)| meta_token_from_secret(&read(service, *account)?))
+        .collect()
+}
+
+/// A Muse keyring payload: the JSON OAuth slot the CLI serializes, or a
+/// bare token. A payload that opens like JSON but does not parse is corrupt,
+/// so it yields nothing instead of shadowing the stores checked after it.
+fn meta_token_from_secret(data: &[u8]) -> Option<Token> {
+    let text = std::str::from_utf8(data).ok()?.trim();
+    if text.starts_with('{') || text.starts_with('[') {
+        return parse_muse_auth(&serde_json::from_str(text).ok()?);
+    }
+    (!text.is_empty()).then(|| Token {
+        access_token: text.to_string(),
+        auth_method: "oauth".into(),
+        ..Default::default()
+    })
+}
+
 fn muse_auth_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    if let Ok(file) = std::env::var("MUSE_AUTH_PATH").map(PathBuf::from) {
+        paths.push(file);
+    }
     if let Ok(dir) = std::env::var("MUSE_CONFIG_DIR").map(PathBuf::from) {
         paths.push(dir.join("auth.json"));
+    }
+    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        paths.push(PathBuf::from(base).join("muse").join("auth.json"));
     }
     let home = home_dir();
     paths.push(home.join(".config").join("muse").join("auth.json"));
@@ -1263,5 +1298,57 @@ mod tests {
         assert!(!is_cli_available(""));
         assert!(!is_cli_available("   "));
         assert!(!is_cli_available("definitely-not-a-real-command-xyzzy"));
+    }
+
+    #[test]
+    fn reads_the_muse_code_keychain_entry() {
+        // Muse with keychain storage writes no token to auth.json: the
+        // OAuth payload lives under its own service, keyed by provider slot.
+        let stored = json!({
+            "access_token": "[REDACTED]",
+            "refresh_token": "[REDACTED]",
+            "expires_at": 4102444800i64,
+            "obtained_via": "device_code",
+            "user_email": "mateo@example.com"
+        })
+        .to_string();
+
+        let tokens = meta_keyring_candidates(|service, account| {
+            (service == "ai.meta.dev.credentials" && account == Some("meta"))
+                .then(|| stored.clone().into_bytes())
+        });
+
+        let token = tokens.first().expect("keychain entry should be read");
+        assert_eq!(token.access_token, "[REDACTED]");
+        assert_eq!(token.refresh_token, "[REDACTED]");
+        assert_eq!(token.email, "mateo@example.com");
+        assert_eq!(token.auth_method, "device_code");
+        assert!(token.is_fresh());
+    }
+
+    #[test]
+    fn a_corrupt_muse_keychain_payload_never_shadows_a_later_store() {
+        let stored = json!({
+            "access_token": "cairn-code-token",
+            "expires_at": 4102444800i64
+        })
+        .to_string();
+
+        let tokens = meta_keyring_candidates(|service, account| match (service, account) {
+            ("ai.meta.dev.credentials", Some("meta")) => Some(b"{not json".to_vec()),
+            ("cairn-code", Some("oauth:meta")) => Some(stored.clone().into_bytes()),
+            _ => None,
+        });
+
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].access_token, "cairn-code-token");
+    }
+
+    #[test]
+    fn a_bare_muse_keychain_token_is_accepted() {
+        let token = meta_token_from_secret(b" bare-token ").expect("bare token should parse");
+        assert_eq!(token.access_token, "bare-token");
+        assert!(meta_token_from_secret(b"  ").is_none());
+        assert!(meta_token_from_secret(br#"{"access_token":"#).is_none());
     }
 }
