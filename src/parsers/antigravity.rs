@@ -41,15 +41,34 @@ pub struct Bucket {
     pub disabled: bool,
 }
 
+// PERF: Zero-allocation ASCII case-insensitive substring checks avoiding heap allocations.
+#[inline]
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let needle_bytes = needle.as_bytes();
+    if needle_bytes.is_empty() {
+        return true;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle_bytes.len())
+        .any(|w| w.eq_ignore_ascii_case(needle_bytes))
+}
+
+#[inline]
+fn starts_with_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let needle_bytes = needle.as_bytes();
+    haystack.len() >= needle_bytes.len()
+        && haystack.as_bytes()[..needle_bytes.len()].eq_ignore_ascii_case(needle_bytes)
+}
+
 /// Model families, ranked for display. Gemini first because it is the family
 /// Antigravity meters most tightly, followed by Claude & GPT, then Argon.
 fn family_rank(label: &str) -> u8 {
-    let lower = label.to_ascii_lowercase();
-    if lower.contains("argon") {
+    if contains_ignore_ascii_case(label, "argon") {
         2
-    } else if lower.starts_with("gemini") {
+    } else if starts_with_ignore_ascii_case(label, "gemini") {
         0
-    } else if lower.starts_with("claude") {
+    } else if starts_with_ignore_ascii_case(label, "claude") {
         1
     } else {
         3
@@ -57,14 +76,18 @@ fn family_rank(label: &str) -> u8 {
 }
 
 fn family_from_model_id(model_id: &str) -> &'static str {
-    let m = model_id.to_ascii_lowercase();
-    if m.contains("argon") {
+    if contains_ignore_ascii_case(model_id, "argon") {
         "Gemini 4 Argon"
-    } else if m.contains("gemini") {
+    } else if contains_ignore_ascii_case(model_id, "gemini") {
         "Gemini"
-    } else if m.contains("claude") || m.starts_with("gpt-") || m.starts_with("gpt_") {
+    } else if contains_ignore_ascii_case(model_id, "claude")
+        || starts_with_ignore_ascii_case(model_id, "gpt-")
+        || starts_with_ignore_ascii_case(model_id, "gpt_")
+    {
         "Claude & GPT"
-    } else if m.starts_with("chat_") || m.starts_with("tab_") {
+    } else if starts_with_ignore_ascii_case(model_id, "chat_")
+        || starts_with_ignore_ascii_case(model_id, "tab_")
+    {
         "Internal"
     } else {
         "Antigravity"
@@ -74,20 +97,24 @@ fn family_from_model_id(model_id: &str) -> &'static str {
 /// Collapse a versioned model id to the name a person recognises, so a family
 /// listing reads "Gemini Pro, Gemini Flash" rather than four dated variants.
 pub fn canonical_model_name(model_id: &str) -> String {
-    let m = model_id.to_ascii_lowercase();
-    let name = if m.contains("argon") {
+    let name = if contains_ignore_ascii_case(model_id, "argon") {
         "Gemini 4 Argon"
-    } else if m.contains("flash-lite") || m.contains("flash_lite") || m.contains("flashlite") {
+    } else if contains_ignore_ascii_case(model_id, "flash-lite")
+        || contains_ignore_ascii_case(model_id, "flash_lite")
+        || contains_ignore_ascii_case(model_id, "flashlite")
+    {
         "Gemini Flash-Lite"
-    } else if m.contains("flash") {
+    } else if contains_ignore_ascii_case(model_id, "flash") {
         "Gemini Flash"
-    } else if m.contains("pro") || m.contains("gemini") {
+    } else if contains_ignore_ascii_case(model_id, "pro")
+        || contains_ignore_ascii_case(model_id, "gemini")
+    {
         "Gemini Pro"
-    } else if m.contains("sonnet") {
+    } else if contains_ignore_ascii_case(model_id, "sonnet") {
         "Claude Sonnet"
-    } else if m.contains("opus") {
+    } else if contains_ignore_ascii_case(model_id, "opus") {
         "Claude Opus"
-    } else if m.contains("gpt") {
+    } else if contains_ignore_ascii_case(model_id, "gpt") {
         "GPT-OSS"
     } else {
         return model_id.to_string();
@@ -131,9 +158,13 @@ fn percentages(remaining_fraction: f64) -> (f64, f64) {
     )
 }
 
+// PERF: Single-pass JSON parsing and direct Value reference processing without re-serialization.
 /// Parse either response shape.
 pub fn parse(body: &str) -> Vec<Bucket> {
-    parse_combined(Some(body), Some(body))
+    let Ok(root) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    parse_values(Some(&root), Some(&root))
 }
 
 /// Parse the local language server's RetrieveUserQuotaSummary reply, which
@@ -144,28 +175,26 @@ pub fn parse_language_server_response(body: &str) -> Vec<Bucket> {
         return Vec::new();
     };
     let inner = root.get("response").unwrap_or(&root);
-    parse_combined(Some(&inner.to_string()), None)
+    parse_values(Some(inner), None)
 }
 
 /// Combine group summaries (which have window, disabled, and group metadata)
 /// with the flat per-model call (which covers models/tiers not yet rolled into groups).
 pub fn parse_combined(summary_json: Option<&str>, flat_json: Option<&str>) -> Vec<Bucket> {
-    let mut summary_buckets = summary_json
-        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-        .and_then(|v| {
-            v.get("groups")
-                .and_then(Value::as_array)
-                .map(|g| from_groups(g))
-        })
+    let summary_val = summary_json.and_then(|s| serde_json::from_str::<Value>(s).ok());
+    let flat_val = flat_json.and_then(|s| serde_json::from_str::<Value>(s).ok());
+    parse_values(summary_val.as_ref(), flat_val.as_ref())
+}
+
+fn parse_values(summary_val: Option<&Value>, flat_val: Option<&Value>) -> Vec<Bucket> {
+    let mut summary_buckets = summary_val
+        .and_then(|v| v.get("groups").and_then(Value::as_array))
+        .map(|g| from_groups(g))
         .unwrap_or_default();
 
-    let flat_buckets = flat_json
-        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-        .and_then(|v| {
-            v.get("buckets")
-                .and_then(Value::as_array)
-                .map(|b| from_flat_buckets(b))
-        })
+    let flat_buckets = flat_val
+        .and_then(|v| v.get("buckets").and_then(Value::as_array))
+        .map(|b| from_flat_buckets(b))
         .unwrap_or_default();
 
     if summary_buckets.is_empty() {
@@ -230,12 +259,13 @@ fn from_groups(groups: &[Value]) -> Vec<Bucket> {
             .get("displayName")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let lower = name.to_ascii_lowercase();
-        let family = if lower.contains("argon") {
+        let family = if contains_ignore_ascii_case(name, "argon") {
             "Gemini 4 Argon"
-        } else if lower.starts_with("gemini") {
+        } else if starts_with_ignore_ascii_case(name, "gemini") {
             "Gemini"
-        } else if lower.contains("claude") || lower.contains("gpt") {
+        } else if contains_ignore_ascii_case(name, "claude")
+            || contains_ignore_ascii_case(name, "gpt")
+        {
             "Claude & GPT"
         } else {
             "Antigravity"
@@ -331,9 +361,10 @@ fn from_flat_buckets(raw: &[Value]) -> Vec<Bucket> {
         let Some(model_id) = entry.get("modelId").and_then(Value::as_str) else {
             continue;
         };
-        let lower = model_id.to_ascii_lowercase();
         // Editor-internal buckets, not something the user spends.
-        if lower.starts_with("chat_") || lower.starts_with("tab_") {
+        if starts_with_ignore_ascii_case(model_id, "chat_")
+            || starts_with_ignore_ascii_case(model_id, "tab_")
+        {
             continue;
         }
 
