@@ -41,15 +41,16 @@ pub struct Bucket {
     pub disabled: bool,
 }
 
+// PERF: Zero-allocation case-insensitive pattern matching instead of string allocations.
 /// Model families, ranked for display. Gemini first because it is the family
 /// Antigravity meters most tightly, followed by Claude & GPT, then Argon.
 fn family_rank(label: &str) -> u8 {
-    let lower = label.to_ascii_lowercase();
-    if lower.contains("argon") {
+    let bytes = label.as_bytes();
+    if bytes.windows(5).any(|w| w.eq_ignore_ascii_case(b"argon")) {
         2
-    } else if lower.starts_with("gemini") {
+    } else if bytes.len() >= 6 && bytes[..6].eq_ignore_ascii_case(b"gemini") {
         0
-    } else if lower.starts_with("claude") {
+    } else if bytes.len() >= 6 && bytes[..6].eq_ignore_ascii_case(b"claude") {
         1
     } else {
         3
@@ -57,14 +58,20 @@ fn family_rank(label: &str) -> u8 {
 }
 
 fn family_from_model_id(model_id: &str) -> &'static str {
-    let m = model_id.to_ascii_lowercase();
-    if m.contains("argon") {
+    let bytes = model_id.as_bytes();
+    if bytes.windows(5).any(|w| w.eq_ignore_ascii_case(b"argon")) {
         "Gemini 4 Argon"
-    } else if m.contains("gemini") {
+    } else if bytes.windows(6).any(|w| w.eq_ignore_ascii_case(b"gemini")) {
         "Gemini"
-    } else if m.contains("claude") || m.starts_with("gpt-") || m.starts_with("gpt_") {
+    } else if bytes.windows(6).any(|w| w.eq_ignore_ascii_case(b"claude"))
+        || (bytes.len() >= 4
+            && (bytes[..4].eq_ignore_ascii_case(b"gpt-")
+                || bytes[..4].eq_ignore_ascii_case(b"gpt_")))
+    {
         "Claude & GPT"
-    } else if m.starts_with("chat_") || m.starts_with("tab_") {
+    } else if (bytes.len() >= 5 && bytes[..5].eq_ignore_ascii_case(b"chat_"))
+        || (bytes.len() >= 4 && bytes[..4].eq_ignore_ascii_case(b"tab_"))
+    {
         "Internal"
     } else {
         "Antigravity"
@@ -74,20 +81,31 @@ fn family_from_model_id(model_id: &str) -> &'static str {
 /// Collapse a versioned model id to the name a person recognises, so a family
 /// listing reads "Gemini Pro, Gemini Flash" rather than four dated variants.
 pub fn canonical_model_name(model_id: &str) -> String {
-    let m = model_id.to_ascii_lowercase();
-    let name = if m.contains("argon") {
+    let bytes = model_id.as_bytes();
+    let name = if bytes.windows(5).any(|w| w.eq_ignore_ascii_case(b"argon")) {
         "Gemini 4 Argon"
-    } else if m.contains("flash-lite") || m.contains("flash_lite") || m.contains("flashlite") {
+    } else if bytes
+        .windows(10)
+        .any(|w| w.eq_ignore_ascii_case(b"flash-lite"))
+        || bytes
+            .windows(10)
+            .any(|w| w.eq_ignore_ascii_case(b"flash_lite"))
+        || bytes
+            .windows(9)
+            .any(|w| w.eq_ignore_ascii_case(b"flashlite"))
+    {
         "Gemini Flash-Lite"
-    } else if m.contains("flash") {
+    } else if bytes.windows(5).any(|w| w.eq_ignore_ascii_case(b"flash")) {
         "Gemini Flash"
-    } else if m.contains("pro") || m.contains("gemini") {
+    } else if bytes.windows(3).any(|w| w.eq_ignore_ascii_case(b"pro"))
+        || bytes.windows(6).any(|w| w.eq_ignore_ascii_case(b"gemini"))
+    {
         "Gemini Pro"
-    } else if m.contains("sonnet") {
+    } else if bytes.windows(6).any(|w| w.eq_ignore_ascii_case(b"sonnet")) {
         "Claude Sonnet"
-    } else if m.contains("opus") {
+    } else if bytes.windows(4).any(|w| w.eq_ignore_ascii_case(b"opus")) {
         "Claude Opus"
-    } else if m.contains("gpt") {
+    } else if bytes.windows(3).any(|w| w.eq_ignore_ascii_case(b"gpt")) {
         "GPT-OSS"
     } else {
         return model_id.to_string();
@@ -203,12 +221,16 @@ pub fn parse_combined(summary_json: Option<&str>, flat_json: Option<&str>) -> Ve
     finalize_buckets(summary_buckets)
 }
 
+// PERF: Pre-evaluate sort keys once per bucket (`O(N)`) using `sort_by_cached_key`
+// instead of re-evaluating `family_rank` and `sort_key` string parsing during
+// every element comparison (`O(N log N)`).
 fn finalize_buckets(mut buckets: Vec<Bucket>) -> Vec<Bucket> {
-    buckets.sort_by(|a, b| {
-        family_rank(&a.group_label)
-            .cmp(&family_rank(&b.group_label))
-            .then(a.timeframe.cmp(&b.timeframe))
-            .then_with(|| sort_key(&a.reset_countdown).cmp(&sort_key(&b.reset_countdown)))
+    buckets.sort_by_cached_key(|b| {
+        (
+            family_rank(&b.group_label),
+            b.timeframe,
+            sort_key(&b.reset_countdown),
+        )
     });
     mark_sessions_under_a_spent_week(buckets)
 }
@@ -230,12 +252,14 @@ fn from_groups(groups: &[Value]) -> Vec<Bucket> {
             .get("displayName")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let lower = name.to_ascii_lowercase();
-        let family = if lower.contains("argon") {
+        let bytes = name.as_bytes();
+        let family = if bytes.windows(5).any(|w| w.eq_ignore_ascii_case(b"argon")) {
             "Gemini 4 Argon"
-        } else if lower.starts_with("gemini") {
+        } else if bytes.len() >= 6 && bytes[..6].eq_ignore_ascii_case(b"gemini") {
             "Gemini"
-        } else if lower.contains("claude") || lower.contains("gpt") {
+        } else if bytes.windows(6).any(|w| w.eq_ignore_ascii_case(b"claude"))
+            || bytes.windows(3).any(|w| w.eq_ignore_ascii_case(b"gpt"))
+        {
             "Claude & GPT"
         } else {
             "Antigravity"
