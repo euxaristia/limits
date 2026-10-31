@@ -210,6 +210,11 @@ impl App {
 
     fn selected_provider(&self) -> Option<&LiveProvider> {
         let visible = self.visible();
+        self.selected_provider_from(&visible)
+    }
+
+    // PERF: Zero-allocation provider lookup when the visible slice is already computed.
+    fn selected_provider_from<'a>(&self, visible: &[&'a LiveProvider]) -> Option<&'a LiveProvider> {
         visible
             .get(self.selected.min(visible.len().saturating_sub(1)))
             .copied()
@@ -340,7 +345,7 @@ fn draw(frame: &mut Frame, app: &App) {
         let [list, detail] =
             Layout::horizontal([Constraint::Length(list_width), Constraint::Fill(1)]).areas(body);
         draw_list(frame, list, app, &visible);
-        draw_detail(frame, detail, app);
+        draw_detail(frame, detail, app, &visible);
     }
 
     draw_footer(frame, footer, app);
@@ -429,8 +434,9 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App, visible: &[&LiveProvider]
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(provider) = app.selected_provider() else {
+// PERF: Reuse pre-computed visible providers slice to avoid re-filtering and re-allocating `Vec<&LiveProvider>`.
+fn draw_detail(frame: &mut Frame, area: Rect, app: &App, visible: &[&LiveProvider]) {
+    let Some(provider) = app.selected_provider_from(visible) else {
         return;
     };
     let usage = &provider.usage;
@@ -623,7 +629,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         ),
         ("+/-", "interval"),
     ];
-    let mut spans = Vec::new();
+    // PERF: Pre-allocate capacity for exact number of spans in footer.
+    let mut spans = Vec::with_capacity(15);
     for (index, (key, action)) in keys.iter().enumerate() {
         if index > 0 {
             spans.push(Span::styled(" \u{b7} ", dim()));
