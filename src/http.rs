@@ -290,8 +290,8 @@ fn parse_response(raw: &str) -> Result<HttpResponse, HttpError> {
             .and_then(|code| code.parse::<u16>().ok());
         rest = &rest[split..];
 
-        // Only an interim or redirect block is followed by another one.
-        if !rest.starts_with("HTTP/") {
+        // Only an interim (1xx) or redirect (3xx) block is followed by another one.
+        if !matches!(status, Some(100..=199 | 300..=399)) || !rest.starts_with("HTTP/") {
             break;
         }
     }
@@ -435,6 +435,17 @@ mod tests {
     fn a_body_with_a_blank_line_survives_intact() {
         let response = parse_response("HTTP/1.1 200 OK\r\n\r\nfirst\r\n\r\nsecond").unwrap();
         assert_eq!(response.body, "first\r\n\r\nsecond");
+    }
+
+    #[test]
+    fn a_body_starting_with_http_prefix_is_not_parsed_as_a_header_block() {
+        let raw = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nHTTP/1.1 200 OK\r\nExtra-Header: val\r\n\r\nbody";
+        let response = parse_response(raw).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body,
+            "HTTP/1.1 200 OK\r\nExtra-Header: val\r\n\r\nbody"
+        );
     }
 
     #[test]
