@@ -310,7 +310,7 @@ fn providers_command() -> i32 {
     config.providers.sort_by(|a, b| {
         b.is_enabled()
             .cmp(&a.is_enabled())
-            .then_with(|| a.id.to_lowercase().cmp(&b.id.to_lowercase()))
+            .then_with(|| a.id.to_ascii_lowercase().cmp(&b.id.to_ascii_lowercase()))
     });
 
     println!("{}", bold("Available providers:"));

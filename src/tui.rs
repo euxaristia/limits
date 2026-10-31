@@ -532,11 +532,14 @@ fn draw_trend(frame: &mut Frame, area: Rect, app: &App, id: &str) {
     let line = if points.len() < 2 {
         Line::styled("trend (% left)  (collecting…)", dim())
     } else {
-        let remaining: Vec<f64> = points.iter().map(|used| 100.0 - used).collect();
+        // PERF: Map `used` points to `remaining` (100.0 - used) directly during slice
+        // rendering to avoid allocating an intermediate heap Vec<f64> on every TUI frame.
         Line::from(vec![
             Span::styled("trend (% left)  ", dim()),
             Span::styled(
-                sparkline(&remaining, area.width.saturating_sub(16) as usize),
+                sparkline_mapped(points, area.width.saturating_sub(16) as usize, |used| {
+                    100.0 - used
+                }),
                 Style::new().fg(severity(*points.last().unwrap_or(&0.0))),
             ),
         ])
@@ -548,7 +551,12 @@ fn draw_trend(frame: &mut Frame, area: Rect, app: &App, id: &str) {
 ///
 /// The scale is fixed at 0-100 rather than fitted to the data: an
 /// auto-scaled spark makes a drift from 40% to 41% look like a cliff.
+#[cfg(test)]
 fn sparkline(points: &[f64], width: usize) -> String {
+    sparkline_mapped(points, width, |p| p)
+}
+
+fn sparkline_mapped(points: &[f64], width: usize, map: impl Fn(f64) -> f64) -> String {
     const BLOCKS: [char; 8] = [
         '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
         '\u{2588}',
@@ -561,7 +569,8 @@ fn sparkline(points: &[f64], width: usize) -> String {
     let start = points.len().saturating_sub(width);
     let slice = &points[start..];
     let mut out = String::with_capacity(slice.len());
-    for &percent in slice {
+    for &val in slice {
+        let percent = map(val);
         let index = ((percent.clamp(0.0, 100.0) / 100.0) * (BLOCKS.len() - 1) as f64).round();
         out.push(BLOCKS[index as usize]);
     }
