@@ -10,9 +10,9 @@
 //! network call, and a provider that stops answering would otherwise freeze
 //! every keystroke for the whole timeout.
 
+use crate::Limits;
 use crate::model::{ProviderUsage, Status, UsageWindow};
 use crate::time::{countdown_between, countdown_seconds, now_unix};
-use crate::{Limits, VERSION};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -363,7 +363,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let elapsed = app.started.elapsed().as_secs();
     let line = Line::from(vec![
         Span::styled(
-            format!(" limits v{VERSION} "),
+            concat!(" limits v", env!("CARGO_PKG_VERSION"), " "),
             Style::new()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -441,7 +441,13 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, visible: &[&LiveProvide
     };
     let usage = &provider.usage;
 
-    let block = Block::bordered().title(format!(" {} ", usage.display_name));
+    // PERF: Title composed from borrowed Spans to avoid heap string allocations on every frame.
+    let title = Line::from(vec![
+        Span::raw(" "),
+        Span::raw(&usage.display_name),
+        Span::raw(" "),
+    ]);
+    let block = Block::bordered().title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -454,10 +460,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, visible: &[&LiveProvide
             _ => Color::Yellow,
         };
         frame.render_widget(
-            Paragraph::new(Line::styled(
-                usage.error_message.clone(),
-                Style::new().fg(colour),
-            )),
+            Paragraph::new(Line::styled(&usage.error_message, Style::new().fg(colour))),
             inner,
         );
         return;
@@ -482,10 +485,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App, visible: &[&LiveProvide
     draw_trend(frame, trend, app, &usage.id);
 
     if footer.height > 0 && !usage.footer.trim().is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::styled(usage.footer.clone(), dim())),
-            footer,
-        );
+        frame.render_widget(Paragraph::new(Line::styled(&usage.footer, dim())), footer);
     }
 }
 
@@ -609,7 +609,7 @@ fn sparkline_mapped(points: &[f64], width: usize, map: impl Fn(f64) -> f64) -> S
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(message) = &app.message {
         frame.render_widget(
-            Paragraph::new(Line::styled(message.clone(), Style::new().fg(Color::Cyan))),
+            Paragraph::new(Line::styled(message.as_str(), Style::new().fg(Color::Cyan))),
             area,
         );
         return;
