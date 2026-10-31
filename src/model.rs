@@ -307,11 +307,15 @@ impl UsageWindow {
     }
 
     /// Remaining capacity when this window reports a measurable allowance.
+    // PERF: Fast-path byte check for '%' before running string suffix checks and parsing.
     pub fn remaining_percent(&self) -> Option<f64> {
         if !self.used_percent.is_finite() {
             return None;
         }
         if let Some(text) = &self.percent_text_override {
+            if !text.as_bytes().contains(&b'%') {
+                return None;
+            }
             let percent = text
                 .strip_suffix("% used")
                 .or_else(|| text.strip_suffix("% remaining"))
