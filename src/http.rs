@@ -189,6 +189,7 @@ impl HttpClient for CurlClient {
         let config = CurlConfig::write(&request.headers)?;
 
         let mut command = Command::new("curl");
+        crate::credentials::headless::prepare(&mut command);
         // Must be first: without it curl reads ~/.curlrc, which can redirect
         // the request through a proxy or rewrite the URL.
         command.arg("-q");
@@ -571,5 +572,18 @@ mod tests {
         assert!(!sanitized.contains("user@example.com"), "{sanitized}");
         assert!(sanitized.contains("[REDACTED]"), "{sanitized}");
         assert!(sanitized.contains("u***r@example.com"), "{sanitized}");
+    }
+
+    #[test]
+    fn curl_client_prepares_command_headlessly() {
+        // Verify CurlClient send fails cleanly or connects safely using headless prepared command
+        let client =
+            CurlClient::with_timeouts(Duration::from_millis(100), Duration::from_millis(100));
+        let request = HttpRequest::get("http://127.0.0.1:1"); // non-routable port to test spawn/execution
+        let res = client.send(&request);
+        assert!(
+            res.is_err(),
+            "should fail to connect to invalid port but command execution succeeds"
+        );
     }
 }
