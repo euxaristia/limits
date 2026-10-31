@@ -251,15 +251,34 @@ impl HttpClient for CurlClient {
 
         if !status.success() {
             let detail = String::from_utf8_lossy(&errors).trim().to_string();
-            return Err(HttpError(if detail.is_empty() {
+            let sanitized = sanitize_curl_error(&detail, &request.headers);
+            return Err(HttpError(if sanitized.is_empty() {
                 format!("curl exited with {status}")
             } else {
-                detail
+                sanitized
             }));
         }
 
         parse_response(&String::from_utf8_lossy(&raw))
     }
+}
+
+/// Redact sensitive header values and emails from curl stderr messages.
+fn sanitize_curl_error(detail: &str, headers: &[(String, String)]) -> String {
+    let mut sanitized = crate::redact::redact_emails(detail);
+    for (_name, value) in headers {
+        let val = value.trim();
+        if val.len() >= 4 {
+            sanitized = sanitized.replace(val, "[REDACTED]");
+            if let Some(token) = val.strip_prefix("Bearer ") {
+                let token = token.trim();
+                if token.len() >= 4 {
+                    sanitized = sanitized.replace(token, "[REDACTED]");
+                }
+            }
+        }
+    }
+    sanitized
 }
 
 /// Split `curl -i` output into a status code and a body.
@@ -524,5 +543,33 @@ mod tests {
                 ("X-Real".into(), "yes".into()),
             ]
         );
+    }
+
+    #[test]
+    fn sanitize_curl_error_redacts_tokens_and_emails() {
+        let headers = vec![
+            (
+                "Authorization".into(),
+                "Bearer secret_access_token_12345".into(),
+            ),
+            (
+                "Cookie".into(),
+                "sessionKey=sensitive_session_cookie_abc".into(),
+            ),
+        ];
+        let raw_detail = "curl: option --config: header Authorization: Bearer secret_access_token_12345 failed for user@example.com with sessionKey=sensitive_session_cookie_abc";
+        let sanitized = sanitize_curl_error(raw_detail, &headers);
+
+        assert!(
+            !sanitized.contains("secret_access_token_12345"),
+            "{sanitized}"
+        );
+        assert!(
+            !sanitized.contains("sensitive_session_cookie_abc"),
+            "{sanitized}"
+        );
+        assert!(!sanitized.contains("user@example.com"), "{sanitized}");
+        assert!(sanitized.contains("[REDACTED]"), "{sanitized}");
+        assert!(sanitized.contains("u***r@example.com"), "{sanitized}");
     }
 }
