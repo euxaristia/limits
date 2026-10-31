@@ -628,7 +628,7 @@ impl<'a> Fetcher<'a> {
         let csrf = std::env::var("ANTIGRAVITY_CSRF_TOKEN").unwrap_or_default();
         let address = address.trim();
         let csrf = csrf.trim();
-        if address.is_empty() || csrf.is_empty() {
+        if address.is_empty() || csrf.is_empty() || !is_local_host(address) {
             return Vec::new();
         }
         let base = if address.starts_with("http://") || address.starts_with("https://") {
@@ -1097,6 +1097,35 @@ fn plural(count: usize, noun: &str) -> String {
     } else {
         format!("{count} {noun}s")
     }
+}
+
+/// Ensure an address targets a local loopback host to prevent SSRF and token leakage.
+fn is_local_host(address: &str) -> bool {
+    let mut s = address.trim();
+    if let Some(rest) = s
+        .strip_prefix("http://")
+        .or_else(|| s.strip_prefix("https://"))
+    {
+        s = rest;
+    }
+    let host_port = s.split('/').next().unwrap_or(s);
+    // Userinfo is never legitimate here, and it breaks the host check: in
+    // "127.0.0.1:8080@evil.com" everything before the '@' is userinfo, so a
+    // naive split on ':' reads "127.0.0.1" as the host while curl would send
+    // the request, CSRF token included, to evil.com.
+    if host_port.contains('@') {
+        return false;
+    }
+    let host = if host_port.starts_with('[') {
+        let end = host_port.find(']').unwrap_or(host_port.len());
+        &host_port[1..end]
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "::1" | "localhost"
+    )
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -1752,6 +1781,23 @@ mod tests {
             account_footer("Claude CLI", &["a@b.com", "Max"]),
             "Claude CLI (a@b.com, Max)"
         );
+    }
+
+    #[test]
+    fn validates_local_loopback_hosts() {
+        assert!(is_local_host("127.0.0.1:8080"));
+        assert!(is_local_host("http://127.0.0.1:1234"));
+        assert!(is_local_host("localhost:80"));
+        assert!(is_local_host("http://localhost/path"));
+        assert!(is_local_host("[::1]:9000"));
+        assert!(is_local_host("http://[::1]:9000"));
+
+        assert!(!is_local_host("example.com:8080"));
+        assert!(!is_local_host("http://evil.com"));
+        assert!(!is_local_host("http://192.168.1.1:8080"));
+        assert!(!is_local_host("http://10.0.0.1:5000"));
+        assert!(!is_local_host("http://127.0.0.1:8080@evil.com"));
+        assert!(!is_local_host("localhost:8080@evil.com"));
     }
 
     #[test]
